@@ -29,7 +29,7 @@ try
 catch (ArgumentParserException ex)
 {
     Console.Error.WriteLine(ex.Message);
-    Console.Out.Write(CliEnvelope.Fail("command.unknown", ex.Message).ToJson());
+    Console.Out.Write(CliEnvelope.Fail("command.invalid", ex.Message).ToJson());
     return 2;
 }
 catch (Exception ex)

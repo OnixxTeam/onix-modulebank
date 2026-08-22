@@ -25,76 +25,80 @@ public sealed class PostgresMigrationRunner(string connectionString) : IMigratio
             var content = await File.ReadAllTextAsync(path, cancellationToken);
             var checksum = ComputeChecksum(content);
 
-            var existingChecksum = await TryGetAppliedChecksumAsync(connection, fileName, cancellationToken);
-
-            if (existingChecksum == checksum)
-            {
-                skipped.Add(fileName);
-                continue;
-            }
-
-            if (existingChecksum is not null)
-            {
-                throw new MigrationConflictException(fileName);
-            }
-
-            await ApplyFileAsync(connection, fileName, checksum, content, cancellationToken);
-            applied.Add(fileName);
+            var wasApplied = await ApplyOneFileAsync(connection, fileName, checksum, content, cancellationToken);
+            (wasApplied ? applied : skipped).Add(fileName);
         }
 
         return new MigrationApplyResult(applied, skipped);
     }
 
-    // migration.applied_files does not exist until 001_schemas.sql itself has run,
-    // so the very first lookup must treat "table missing" the same as "not applied yet".
-    private static async Task<string?> TryGetAppliedChecksumAsync(
-        NpgsqlConnection connection, string fileName, CancellationToken cancellationToken)
+    // One transaction per file: check the journal, then either roll back (already
+    // applied with a matching checksum, or a conflict) or run the file's DDL and record
+    // it, then commit. The one exception is the very first file ever applied: it creates
+    // migration.applied_files itself, so the initial lookup fails with "table does not
+    // exist" and aborts that transaction — it has to be rolled back and replaced with a
+    // fresh one before the DDL can run on this connection.
+    private static async Task<bool> ApplyOneFileAsync(
+        NpgsqlConnection connection, string fileName, string checksum, string content, CancellationToken cancellationToken)
     {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            await using var command = new NpgsqlCommand(
-                "select checksum from migration.applied_files where file_name = @file_name",
+            string? existingChecksum;
+            try
+            {
+                await using var select = new NpgsqlCommand(
+                    "select checksum from migration.applied_files where file_name = @file_name",
+                    connection,
+                    transaction);
+                select.Parameters.AddWithValue("file_name", fileName);
+                existingChecksum = (string?)await select.ExecuteScalarAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedTable or PostgresErrorCodes.InvalidSchemaName)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                transaction = await connection.BeginTransactionAsync(cancellationToken);
+                existingChecksum = null;
+            }
+
+            if (existingChecksum == checksum)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            if (existingChecksum is not null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new MigrationConflictException(fileName);
+            }
+
+            // `set local role` is scoped to this transaction and reverts automatically on
+            // commit or rollback, so newly created objects are owned by course_owner
+            // without permanently elevating the migrator's session role.
+            await using (var apply = new NpgsqlCommand($"set local role course_owner;\n{content}", connection, transaction))
+            {
+                await apply.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var record = new NpgsqlCommand(
+                "insert into migration.applied_files (file_name, checksum) values (@file_name, @checksum)",
                 connection,
-                transaction);
-            command.Parameters.AddWithValue("file_name", fileName);
+                transaction))
+            {
+                record.Parameters.AddWithValue("file_name", fileName);
+                record.Parameters.AddWithValue("checksum", checksum);
+                await record.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-            var result = await command.ExecuteScalarAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return result as string;
+            return true;
         }
-        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedTable or PostgresErrorCodes.InvalidSchemaName)
+        finally
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return null;
+            await transaction.DisposeAsync();
         }
-    }
-
-    private static async Task ApplyFileAsync(
-        NpgsqlConnection connection, string fileName, string checksum, string content, CancellationToken cancellationToken)
-    {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-
-        // `set local role` is scoped to this transaction and reverts automatically on
-        // commit or rollback, so newly created objects are owned by course_owner without
-        // permanently elevating the migrator's session role.
-        await using (var apply = new NpgsqlCommand($"set local role course_owner;\n{content}", connection, transaction))
-        {
-            await apply.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await using (var record = new NpgsqlCommand(
-            "insert into migration.applied_files (file_name, checksum) values (@file_name, @checksum)",
-            connection,
-            transaction))
-        {
-            record.Parameters.AddWithValue("file_name", fileName);
-            record.Parameters.AddWithValue("checksum", checksum);
-            await record.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await transaction.CommitAsync(cancellationToken);
     }
 
     private static string ComputeChecksum(string content)
