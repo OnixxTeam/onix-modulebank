@@ -35,6 +35,18 @@ try
             envelope = await ActionListCommand.ExecuteAsync(
                 new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")), CancellationToken.None);
             break;
+        case "action activate":
+            envelope = await ActionActivateCommand.ExecuteAsync(
+                parsed,
+                new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "action disable":
+            envelope = await ActionDisableCommand.ExecuteAsync(
+                parsed,
+                new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
             Console.Out.Write(CliEnvelope.Fail("command.unknown", $"unknown command: {parsed.Name}").ToJson());
