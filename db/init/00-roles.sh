@@ -18,5 +18,6 @@ psql -v ON_ERROR_STOP=1 \
 
 	revoke all on database course from public;
 	grant connect on database course to course_migrator, course_publisher, course_runtime;
+	grant create on database course to course_owner;
 	revoke all on schema public from public;
 	SQL

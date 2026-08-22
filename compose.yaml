@@ -1,3 +1,9 @@
+x-course-db-env: &course-db-env
+  COURSE_DB_HOST: postgres
+  COURSE_DB_PORT: "5432"
+  COURSE_DB_NAME: course
+  COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -16,6 +22,18 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  bootstrap:
+    build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
+    command: ["bootstrap"]
+    environment: *course-db-env
+    restart: "no"
+    depends_on: {postgres: {condition: service_healthy}}
+
+  cli:
+    build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
+    environment: *course-db-env
+    depends_on: {postgres: {condition: service_healthy}}
 
 volumes:
   pgdata:
