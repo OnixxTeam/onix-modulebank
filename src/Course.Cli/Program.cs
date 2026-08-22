@@ -2,20 +2,38 @@ using Course.Cli;
 using Course.Cli.Commands;
 using Course.Core.Cli;
 using Course.Infrastructure.Postgres;
+using Course.Infrastructure.Validation;
 
 try
 {
     var parsed = ArgumentParser.Parse(args);
-    var runner = new PostgresMigrationRunner(BuildConnectionString());
 
     CliEnvelope envelope;
     switch (parsed.Name)
     {
         case "migration apply":
-            envelope = await MigrationApplyCommand.ExecuteAsync(parsed, runner, CancellationToken.None);
+            envelope = await MigrationApplyCommand.ExecuteAsync(
+                parsed, new PostgresMigrationRunner(BuildConnectionString("course_migrator", "COURSE_MIGRATOR_PASSWORD")), CancellationToken.None);
             break;
         case "bootstrap":
-            envelope = await BootstrapCommand.ExecuteAsync(runner, CancellationToken.None);
+            envelope = await BootstrapCommand.ExecuteAsync(
+                new PostgresMigrationRunner(BuildConnectionString("course_migrator", "COURSE_MIGRATOR_PASSWORD")), CancellationToken.None);
+            break;
+        case "action validate":
+            envelope = await ActionValidateCommand.ExecuteAsync(
+                parsed, new JsonSchemaValidator(), ManifestSchema.Load(), CancellationToken.None);
+            break;
+        case "action publish":
+            envelope = await ActionPublishCommand.ExecuteAsync(
+                parsed,
+                new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                new JsonSchemaValidator(),
+                ManifestSchema.Load(),
+                CancellationToken.None);
+            break;
+        case "action list":
+            envelope = await ActionListCommand.ExecuteAsync(
+                new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")), CancellationToken.None);
             break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
@@ -39,20 +57,20 @@ catch (Exception ex)
     return 1;
 }
 
-static string BuildConnectionString()
+static string BuildConnectionString(string username, string passwordEnvironmentVariable)
 {
     var host = Environment.GetEnvironmentVariable("COURSE_DB_HOST") ?? "postgres";
     var port = Environment.GetEnvironmentVariable("COURSE_DB_PORT") ?? "5432";
     var database = Environment.GetEnvironmentVariable("COURSE_DB_NAME") ?? "course";
-    var password = Environment.GetEnvironmentVariable("COURSE_MIGRATOR_PASSWORD")
-        ?? throw new InvalidOperationException("COURSE_MIGRATOR_PASSWORD is not set");
+    var password = Environment.GetEnvironmentVariable(passwordEnvironmentVariable)
+        ?? throw new InvalidOperationException($"{passwordEnvironmentVariable} is not set");
 
     return new Npgsql.NpgsqlConnectionStringBuilder
     {
         Host = host,
         Port = int.Parse(port, System.Globalization.CultureInfo.InvariantCulture),
         Database = database,
-        Username = "course_migrator",
+        Username = username,
         Password = password,
     }.ConnectionString;
 }

@@ -2,6 +2,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 COPY Directory.Build.props ./
+COPY contracts/ contracts/
 COPY src/Course.Core/Course.Core.csproj src/Course.Core/
 COPY src/Course.Infrastructure/Course.Infrastructure.csproj src/Course.Infrastructure/
 COPY src/Course.Cli/Course.Cli.csproj src/Course.Cli/
