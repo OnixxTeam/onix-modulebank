@@ -3,6 +3,7 @@ x-course-db-env: &course-db-env
   COURSE_DB_PORT: "5432"
   COURSE_DB_NAME: course
   COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
+  COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
 
 services:
   postgres:
