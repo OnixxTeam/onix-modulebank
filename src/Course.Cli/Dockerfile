@@ -17,5 +17,6 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish ./
 COPY db/migrations ./migrations
+COPY db/manifests ./manifests
 
 ENTRYPOINT ["dotnet", "Course.Cli.dll"]

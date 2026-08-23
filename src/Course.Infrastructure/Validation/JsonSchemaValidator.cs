@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Course.Core.Validation;
@@ -17,11 +18,17 @@ public sealed class JsonSchemaValidator : ISchemaValidator
         OutputFormat = OutputFormat.List,
     };
 
+    // A schema that declares $id registers into Json.Schema.Net's process-wide
+    // SchemaRegistry on every Deserialize<JsonSchema>() call, and a second
+    // registration of the same $id throws -- which repeated action manifests
+    // (bootstrap publishing several in one process) and repeated requests
+    // against the same action (a fresh JsonNode from the catalog every call)
+    // both do. Compiling each distinct schema exactly once avoids re-registering.
+    private readonly ConcurrentDictionary<string, JsonSchema> compiledSchemas = new();
+
     public SchemaValidationResult Validate(JsonNode schema, JsonNode instance)
     {
-        var compiled = schema.Deserialize<JsonSchema>()
-            ?? throw new InvalidOperationException("schema document did not deserialize");
-
+        var compiled = compiledSchemas.GetOrAdd(schema.ToJsonString(), CompileSchema);
         var element = instance.Deserialize<JsonElement>();
         var result = compiled.Evaluate(element, Options);
 
@@ -37,4 +44,8 @@ public sealed class JsonSchemaValidator : ISchemaValidator
 
         return SchemaValidationResult.Failure(errors);
     }
+
+    private static JsonSchema CompileSchema(string schemaJson) =>
+        JsonNode.Parse(schemaJson)!.Deserialize<JsonSchema>()
+            ?? throw new InvalidOperationException("schema document did not deserialize");
 }

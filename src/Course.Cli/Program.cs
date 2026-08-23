@@ -17,7 +17,11 @@ try
             break;
         case "bootstrap":
             envelope = await BootstrapCommand.ExecuteAsync(
-                new PostgresMigrationRunner(BuildConnectionString("course_migrator", "COURSE_MIGRATOR_PASSWORD")), CancellationToken.None);
+                new PostgresMigrationRunner(BuildConnectionString("course_migrator", "COURSE_MIGRATOR_PASSWORD")),
+                new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                new JsonSchemaValidator(),
+                ManifestSchema.Load(),
+                CancellationToken.None);
             break;
         case "action validate":
             envelope = await ActionValidateCommand.ExecuteAsync(
