@@ -40,6 +40,11 @@ services:
       COURSE_RUNTIME_DSN: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=${COURSE_RUNTIME_PASSWORD:-runtime}
     depends_on: {bootstrap: {condition: service_completed_successfully}}
 
+  gateway:
+    build: {context: ., dockerfile: src/Course.Gateway/Dockerfile}
+    ports: ["8080:8080"]          # единственная публикация порта во всём файле
+    depends_on: {api: {condition: service_started}}
+
   cli:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
     environment: *course-db-env
