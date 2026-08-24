@@ -1,3 +1,4 @@
+using Course.Core.Errors;
 using Course.Infrastructure.Postgres;
 using Npgsql;
 
@@ -5,6 +6,30 @@ namespace Course.Tests.Unit;
 
 public sealed class ErrorMappingTests
 {
+    // A target's own status=error business code, outside the fixed transport matrix,
+    // still gets a controlled 404 when its last segment is not_found (issue 03:
+    // operation.get's operation.not_found must not collapse into a 500).
+    [Fact]
+    public void BusinessNotFoundCode_MapsToNotFoundKeepingCode()
+    {
+        var error = ActionError.ForCode("operation.not_found", "operation not found", retryable: false);
+
+        Assert.Equal(404, error.HttpStatus);
+        Assert.Equal("operation.not_found", error.Code);
+        Assert.Equal("operation not found", error.Message);
+    }
+
+    // A business code outside the matrix that does not end in .not_found still collapses
+    // into internal.error -- a target cannot pick its own status by inventing a code.
+    [Fact]
+    public void UnknownBusinessCode_StillMapsToInternalError()
+    {
+        var error = ActionError.ForCode("demo.whatever", "forced failure", retryable: false);
+
+        Assert.Equal(500, error.HttpStatus);
+        Assert.Equal("internal.error", error.Code);
+    }
+
     // Checked before the generic IsTransient branch: PostgresException is itself
     // an NpgsqlException, so 57014 (query_canceled) must win the switch before
     // falling through to dependency.unavailable.

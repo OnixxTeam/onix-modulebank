@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace Course.Core.Errors;
 
@@ -50,15 +51,29 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
 
     public static ActionError InternalError() => new(500, "internal.error", "unexpected runtime failure");
 
+    // A dotted business code, same shape the checker requires of forcedErrorCode
+    // (autocheck/public_check.py:328), whose last segment is not_found. Some contract
+    // sections (e.g. operation.get) promise a controlled domain error rather than a 500
+    // for "no such record", so this narrow suffix is let through as 404 even though it
+    // is not in KnownCodeStatus. Only the .not_found suffix opens this door: a target
+    // still cannot pick its own status by inventing an arbitrary code.
+    private static readonly Regex BusinessNotFoundCode = new(
+        @"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\.not_found$",
+        RegexOptions.Compiled);
+
     // Maps a status=error envelope's own `code` (as returned by api.invoke or, for now
     // untouched, the target function) to its contract HTTP status. Anything outside the
-    // fixed matrix collapses to internal.error rather than inventing a status for a
-    // business code this runtime layer does not understand.
+    // fixed matrix collapses to internal.error, except a BusinessNotFoundCode match.
     public static ActionError ForCode(string code, string? message, bool retryable)
     {
         if (KnownCodeStatus.TryGetValue(code, out var httpStatus))
         {
             return new ActionError(httpStatus, code, message ?? code, retryable);
+        }
+
+        if (BusinessNotFoundCode.IsMatch(code))
+        {
+            return new ActionError(404, code, message ?? code, retryable);
         }
 
         return InternalError();
