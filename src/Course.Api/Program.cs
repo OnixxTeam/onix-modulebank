@@ -1,8 +1,10 @@
 using Course.Api.Endpoints;
 using Course.Api.Middleware;
 using Course.Core.Actions;
+using Course.Core.OpenApi;
 using Course.Core.Security;
 using Course.Core.Validation;
+using Course.Infrastructure.OpenApi;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Security;
 using Course.Infrastructure.Validation;
@@ -31,6 +33,7 @@ builder.Services.AddSingleton(runtimeDataSource);
 builder.Services.AddSingleton<ISchemaValidator, JsonSchemaValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IActionExecutor, PostgresActionExecutor>();
+builder.Services.AddSingleton<IOpenApiBuilder, CatalogOpenApiBuilder>();
 builder.Services.AddSingleton<IJwtAuthenticator>(new JwtContextFactory(jwtOptions));
 
 var app = builder.Build();
@@ -66,6 +69,9 @@ app.MapGet("/health/ready", async (NpgsqlDataSource dataSource, CancellationToke
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
 });
+
+app.MapGet("/openapi/default.json", OpenApiEndpoints.HandleDefaultAsync);
+app.MapGet("/openapi/actions/{module}/{action}/{version}.json", OpenApiEndpoints.HandleVersionAsync);
 
 app.MapPost("/api/{*rest}", ActionEndpoint.HandleAsync);
 
