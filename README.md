@@ -62,12 +62,37 @@ make start_prod # docker compose up -d --build
 | `COURSE_JWT_SIGNING_KEY` | HS256-ключ ≥ 32 байт; проверка подменяет через Compose override |
 | `COURSE_RUNTIME_DSN` | строка подключения ролью `course_runtime` |
 
-`postgres`, `cli` и `bootstrap` читают пароли ролей (`COURSE_MIGRATOR_PASSWORD`,
-`COURSE_PUBLISHER_PASSWORD`, `COURSE_RUNTIME_PASSWORD`) и `POSTGRES_PASSWORD` —
-все со значением `${VAR:-default}` в [`compose.yaml`](compose.yaml): если
-переменная не задана, применяется dev-плейсхолдер, что позволяет поднять стек
-без файла `.env`. Для локальной настройки скопируйте [`.env.example`](.env.example)
-в `.env` — реальных секретов там нет, только dev-плейсхолдеры.
+`cli` и `bootstrap` (один и тот же образ) собирают строку подключения сами:
+
+| Переменная | Назначение |
+|---|---|
+| `COURSE_DB_HOST` | хост PostgreSQL (`postgres` внутри Compose) |
+| `COURSE_DB_PORT` | порт PostgreSQL (`5432`) |
+| `COURSE_DB_NAME` | имя базы (`course`) |
+| `COURSE_MIGRATOR_PASSWORD` | пароль роли `course_migrator`, только для `migration apply` |
+| `COURSE_PUBLISHER_PASSWORD` | пароль роли `course_publisher`, только для команд `action` |
+
+Роль выбирается командой, а не конфигурацией: миграции идут под
+`course_migrator`, публикация манифестов — под `course_publisher`, поэтому у
+CLI нет одной общей пары credentials.
+
+`postgres` получает `POSTGRES_PASSWORD` для собственного суперпользователя и
+все три пароля ролей — их читает [`db/init/00-roles.sh`](db/init/00-roles.sh)
+при первичной инициализации тома. `COURSE_RUNTIME_PASSWORD` больше нигде из
+окружения не берётся: в `api` он попадает уже внутри `COURSE_RUNTIME_DSN`.
+
+Все переменные, которые Compose берёт из окружения, записаны как
+`${VAR:-default}` в [`compose.yaml`](compose.yaml): если переменная не задана,
+применяется dev-плейсхолдер, поэтому стек поднимается и без файла `.env`.
+Остальные значения (`COURSE_DB_HOST`, `COURSE_JWT_ISSUER`, `COURSE_RUNTIME_DSN`
+и прочие адреса внутри Compose-сети) заданы в `compose.yaml` литералами и
+через окружение не переопределяются.
+
+Скопируйте [`.env.example`](.env.example) в `.env` — реальных секретов там нет,
+только dev-плейсхолдеры. Файл разделён на два блока: первый подставляется в
+`compose.yaml`, второй нужен целям `make start_local_api` и
+`make start_local_cli`, которые запускают проекты вне Docker и читают `.env`
+напрямую. Второй блок на `docker compose up` не влияет.
 
 ### Миграции
 
