@@ -10,8 +10,11 @@ namespace Course.Infrastructure.Postgres;
 
 // The entire step 5-13 pipeline from spec §5.1 (BEGIN .. manifest .. idempotency/policy
 // checks .. statement timeout .. request validation .. api.invoke .. envelope/response
-// validation .. COMMIT) lives in this one method, so CommitAsync appears exactly once
-// in the whole codebase and any early return rolls the transaction back via `await using`.
+// validation .. COMMIT) lives in this one method. Every early return rolls the
+// transaction back via `await using` -- except the status=="error" branch below, which
+// commits first: migration 015's api.invoke already rolled the domain effect back to a
+// savepoint for that case, leaving only the dispatch row to persist as the technical
+// audit trail (contract-reference: "Target вернул status=error" row).
 public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaValidator validator, TimeProvider timeProvider)
     : IActionExecutor
 {
@@ -73,6 +76,12 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             var code = envelope["code"]?.GetValue<string>() ?? "internal.error";
             var message = envelope["message"]?.GetValue<string>();
             var retryable = envelope["retryable"]?.GetValue<bool>() ?? false;
+
+            // api.invoke already rolled the domain effect (and any idempotency claim)
+            // back to a savepoint for this branch, so all that is left in the
+            // transaction is the dispatch row recording the technical failure --
+            // commit to keep it instead of discarding it with everything else.
+            await transaction.CommitAsync(cancellationToken);
             return ActionExecutionResult.Failure(ActionError.ForCode(code, message, retryable), manifest.Version);
         }
 

@@ -10,13 +10,13 @@ public sealed class RollbackTests(ApiFactory factory)
     // target (testfixture.error_after_insert_v1) writes a canary row and then
     // reports a controlled business failure in the same call.
     //
-    // Only the canary half is asserted here: PostgresActionExecutor never calls
-    // CommitAsync on this branch, so api.action_dispatches' insert (written by
-    // api.invoke inside the same transaction) rolls back too and never survives
-    // to be checked -- contradicting the matrix's "dispatch содержит техническую
-    // ошибку" half. See .scratch/findings-dispatch-rollback-gap.md.
+    // Migration 015's api.invoke rolls the domain effect back to a savepoint on
+    // this branch, and PostgresActionExecutor commits the outer transaction
+    // instead of discarding it -- so the canary disappears but the dispatch row
+    // survives as the technical audit trail. See
+    // .scratch/findings-dispatch-rollback-gap.md.
     [Fact]
-    public async Task TargetStatusError_RollsBackTheWrite()
+    public async Task TargetStatusError_RollsBackTheWrite_ButKeepsTheDispatchRow()
     {
         using var client = factory.CreateClient();
         var token = ApiFactory.CreateToken("candidate-client", "web", "payment:write payment:read");
@@ -35,6 +35,12 @@ public sealed class RollbackTests(ApiFactory factory)
             ("correlationId", correlationId));
 
         Assert.False(canaryExists);
+
+        var dispatchStatus = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select status from api.action_dispatches where correlation_id = @correlationId",
+            ("correlationId", correlationId));
+
+        Assert.Equal("ERROR", dispatchStatus);
     }
 
     // contract-reference matrix: "Неизвестный outcome или invalid result ->
