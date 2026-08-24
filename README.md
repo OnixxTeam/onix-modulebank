@@ -40,7 +40,7 @@ commit/rollback. Подробности и границы доверия — [C4
 Требуется Docker Compose (проверено на Docker 29.4.1 / Compose 5.4.0).
 
 ```bash
-docker compose up -d --build
+make start_prod # docker compose up -d --build
 ```
 
 Все команды выполняются из корня чистого clone. После запуска:
