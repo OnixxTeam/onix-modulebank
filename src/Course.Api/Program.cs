@@ -88,3 +88,7 @@ internal sealed class ReadinessState
 
     public void MarkInitialized() => isInitialized = true;
 }
+
+// Top-level statements otherwise generate an internal Program class; WebApplicationFactory<Program>
+// (Integration/ApiFactory.cs) needs a public one to boot this app in-process for testing.
+public partial class Program;
