@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using Course.Api.Http;
 using Course.Core.Errors;
 using Course.Core.OpenApi;
@@ -13,7 +12,7 @@ public static class OpenApiEndpoints
     public static async Task HandleDefaultAsync(HttpContext httpContext, IOpenApiBuilder builder)
     {
         var document = await builder.BuildDefaultDocumentAsync(httpContext.RequestAborted);
-        await WriteJsonAsync(httpContext, document);
+        await ActionEnvelopeWriter.WriteJsonAsync(httpContext, StatusCodes.Status200OK, document);
     }
 
     public static async Task HandleVersionAsync(
@@ -32,12 +31,6 @@ public static class OpenApiEndpoints
             return;
         }
 
-        await WriteJsonAsync(httpContext, document);
-    }
-
-    private static async Task WriteJsonAsync(HttpContext httpContext, JsonNode document)
-    {
-        httpContext.Response.ContentType = "application/json";
-        await httpContext.Response.WriteAsync(document.ToJsonString());
+        await ActionEnvelopeWriter.WriteJsonAsync(httpContext, StatusCodes.Status200OK, document);
     }
 }

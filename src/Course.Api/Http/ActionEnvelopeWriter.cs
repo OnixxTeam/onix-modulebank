@@ -47,7 +47,13 @@ public static class ActionEnvelopeWriter
         return WriteAsync(context, error.HttpStatus, body);
     }
 
-    private static async Task WriteAsync(HttpContext context, int statusCode, JsonObject body)
+    // Not just the two action envelope shapes: OpenApiEndpoints writes plain documents
+    // through this same method, so there is still only one place in the process that
+    // sets the JSON content type and serializes the response body.
+    public static Task WriteJsonAsync(HttpContext context, int statusCode, JsonNode body) =>
+        WriteAsync(context, statusCode, body);
+
+    private static async Task WriteAsync(HttpContext context, int statusCode, JsonNode body)
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "application/json";

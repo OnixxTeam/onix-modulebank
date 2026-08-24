@@ -19,6 +19,8 @@ public sealed class CatalogOpenApiBuilder(NpgsqlDataSource dataSource) : IOpenAp
         var document = NewDocument();
         var paths = (JsonObject)document["paths"]!;
 
+        // api.openapi_default_actions() coalesces to '[]'::jsonb, never sql null
+        // (migration 014), so rows is always a JsonArray here.
         foreach (var row in rows!.AsArray())
         {
             var (path, operation) = BuildPathAndOperation(row!);
