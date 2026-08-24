@@ -8,6 +8,6 @@ public static class ActionListCommand
     public static async Task<CliEnvelope> ExecuteAsync(IActionPublisher publisher, CancellationToken cancellationToken)
     {
         var actions = await publisher.ListAsync(cancellationToken);
-        return CliEnvelope.Ok(actions);
+        return CliEnvelope.Ok(new { items = actions });
     }
 }
