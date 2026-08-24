@@ -6,17 +6,17 @@ help:  ## показать доступные команды
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	 | awk -F':.*?## ' '{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-start_local_db:  ## поднять только postgres из compose
+start_local_db:  ## поднять только postgres из compose (публикует 5432 на хост)
 	docker compose up -d postgres
 
 start_local_api:  ## запустить Course.Api локально против local db
-	dotnet run --project src/Course.Api
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Api
 
 start_local_gateway:  ## запустить Course.Gateway локально
-	dotnet run --project src/Course.Gateway
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Gateway
 
-start_local_cli:  ## запустить Course.Cli локально
-	dotnet run --project src/Course.Cli
+start_local_cli:  ## запустить Course.Cli локально; ARGS="migration apply" передаёт команду
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Cli -- $(ARGS)
 
 format:  ## применить dotnet format
 	dotnet format $(SOLUTION)
