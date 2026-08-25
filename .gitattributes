@@ -1,0 +1,17 @@
+# Auto-detect text files, normalize line endings on checkin
+* text=auto
+
+# Scripts must always use LF - CRLF breaks the shebang line on Linux
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# Keep SQL/JSON/YAML consistent across platforms
+*.sql text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# .NET source - let git normalize but don't force eol (tooling handles both)
+*.cs text=auto diff=csharp
+*.csproj text=auto
+*.sln text eol=crlf
