@@ -81,7 +81,7 @@ static string BuildConnectionString(string username, string passwordEnvironmentV
     var password = Environment.GetEnvironmentVariable(passwordEnvironmentVariable)
         ?? throw new InvalidOperationException($"{passwordEnvironmentVariable} is not set");
 
-    return new Npgsql.NpgsqlConnectionStringBuilder
+    var connectionString = new Npgsql.NpgsqlConnectionStringBuilder
     {
         Host = host,
         Port = int.Parse(port, System.Globalization.CultureInfo.InvariantCulture),
@@ -89,4 +89,6 @@ static string BuildConnectionString(string username, string passwordEnvironmentV
         Username = username,
         Password = password,
     }.ConnectionString;
+
+    return PostgresConnectionString.WithoutGssNegotiation(connectionString);
 }

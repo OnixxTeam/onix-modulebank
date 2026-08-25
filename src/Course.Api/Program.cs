@@ -27,7 +27,8 @@ var jwtOptions = new JwtOptions(
 // One NpgsqlDataSource for the process lifetime; connections are taken from it
 // per request/health-check, never cached, so readiness recovers on its own once
 // PostgreSQL comes back -- no state to reset after a stop/start cycle.
-var runtimeDataSource = NpgsqlDataSource.Create(RequireEnv("COURSE_RUNTIME_DSN"));
+var runtimeDataSource = NpgsqlDataSource.Create(
+    PostgresConnectionString.WithoutGssNegotiation(RequireEnv("COURSE_RUNTIME_DSN")));
 
 builder.Services.AddSingleton(runtimeDataSource);
 builder.Services.AddSingleton<ISchemaValidator, JsonSchemaValidator>();
