@@ -83,4 +83,29 @@ internal static class TestManifests
           "is_default": true
         }
         """)!;
+
+    // A disposable route per test, so exercising publish/activate/disable
+    // transitions cannot disturb the default version any other test calls
+    // through. Points at the same echo_v1 target: what is under test is the
+    // catalog transition, not anything the target does.
+    public static JsonNode Probe(string action, int version, bool isDefault) => JsonNode.Parse($$"""
+        {
+          "contract_version": "course-1",
+          "module": "testfixture",
+          "action": "{{action}}",
+          "version": {{version}},
+          "http_method": "POST",
+          "target_schema": "testfixture",
+          "target_function": "echo_v1",
+          "request_schema": {{GenericObjectSchema}},
+          "response_schema": {{GenericObjectSchema}},
+          "outcomes": ["ECHOED"],
+          "required_policy": [],
+          "idempotency_mode": "none",
+          "idempotency_scope": "none",
+          "timeout_ms": 5000,
+          "enabled": true,
+          "is_default": {{(isDefault ? "true" : "false")}}
+        }
+        """)!;
 }
