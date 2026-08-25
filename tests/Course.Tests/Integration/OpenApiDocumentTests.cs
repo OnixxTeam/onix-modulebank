@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
-using Course.Core.Actions;
 
 namespace Course.Tests.Integration;
 
@@ -39,7 +38,7 @@ public sealed class OpenApiDocumentTests(ApiFactory factory)
     [Fact]
     public async Task DefaultDocument_FollowsActivateWithoutRestart()
     {
-        var action = $"openapi_probe_{Guid.NewGuid():N}"[..24];
+        var action = ProbeRoute.NewAction("openapi_probe");
         await PublishAsync(action, version: 1, isDefault: true);
         await PublishAsync(action, version: 2, isDefault: false);
 
@@ -47,7 +46,7 @@ public sealed class OpenApiDocumentTests(ApiFactory factory)
         var before = await client.GetFromJsonAsync<JsonNode>("/openapi/default.json");
         Assert.Equal(1, VersionParameter(before!, $"/api/testfixture/{action}")["schema"]!["const"]!.GetValue<int>());
 
-        var activated = await factory.Postgres.Publisher.ActivateAsync("testfixture", action, 2, CancellationToken.None);
+        var activated = await factory.Postgres.Publisher.ActivateAsync(ProbeRoute.Module, action, 2, CancellationToken.None);
         Assert.Equal("ok", activated["status"]!.GetValue<string>());
 
         var after = await client.GetFromJsonAsync<JsonNode>("/openapi/default.json");
@@ -60,7 +59,7 @@ public sealed class OpenApiDocumentTests(ApiFactory factory)
     [Fact]
     public async Task VersionDocument_DeclaresTheVersionEvenWhenNotDefault()
     {
-        var action = $"openapi_probe_{Guid.NewGuid():N}"[..24];
+        var action = ProbeRoute.NewAction("openapi_probe");
         await PublishAsync(action, version: 1, isDefault: true);
         await PublishAsync(action, version: 2, isDefault: false);
 
@@ -71,16 +70,44 @@ public sealed class OpenApiDocumentTests(ApiFactory factory)
         Assert.Equal(2, VersionParameter(document!, $"/api/testfixture/{action}")["schema"]!["const"]!.GetValue<int>());
     }
 
+    // "документы версий не ограничены enabled/is_default: выключенная версия
+    // всё ещё опубликовала контракт" (migration 014) -- the version document has
+    // to keep describing the header that reaches it after disable.
+    [Fact]
+    public async Task VersionDocument_DeclaresTheVersionEvenWhenDisabled()
+    {
+        var action = ProbeRoute.NewAction("openapi_probe");
+        await PublishAsync(action, version: 1, isDefault: true);
+        await PublishAsync(action, version: 2, isDefault: false, enabled: false);
+
+        using var client = factory.CreateClient();
+
+        var document = await client.GetFromJsonAsync<JsonNode>($"/openapi/actions/testfixture/{action}/2.json");
+
+        Assert.Equal(2, VersionParameter(document!, $"/api/testfixture/{action}")["schema"]!["const"]!.GetValue<int>());
+    }
+
+    // The default document is the enabled default routes only, so the disabled
+    // version must not leak into it under the route's path.
+    [Fact]
+    public async Task DefaultDocument_OmitsARouteWithNoEnabledDefault()
+    {
+        var action = ProbeRoute.NewAction("openapi_probe");
+        await PublishAsync(action, version: 1, isDefault: false, enabled: false);
+
+        using var client = factory.CreateClient();
+
+        var document = await client.GetFromJsonAsync<JsonNode>("/openapi/default.json");
+
+        Assert.Null(document!["paths"]![$"/api/testfixture/{action}"]);
+    }
+
     private static JsonNode VersionParameter(JsonNode document, string path)
     {
         var parameters = document["paths"]![path]!["post"]!["parameters"]!.AsArray();
         return Assert.Single(parameters, p => p!["name"]!.GetValue<string>() == "X-Action-Version")!;
     }
 
-    private async Task PublishAsync(string action, int version, bool isDefault)
-    {
-        var manifest = ActionManifest.FromDocument(TestManifests.Probe(action, version, isDefault));
-        var result = await factory.Postgres.Publisher.PublishAsync(manifest, CancellationToken.None);
-        Assert.Equal("ok", result["status"]!.GetValue<string>());
-    }
+    private Task<JsonNode> PublishAsync(string action, int version, bool isDefault, bool enabled = true) =>
+        ProbeRoute.PublishAsync(factory, action, version, isDefault, enabled);
 }

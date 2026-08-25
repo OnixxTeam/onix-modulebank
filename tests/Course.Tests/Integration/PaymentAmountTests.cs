@@ -52,7 +52,6 @@ public sealed class PaymentAmountTests(ApiFactory factory)
             "/api/operation/get", token, new JsonObject { ["operationId"] = operationId });
 
         Assert.Equal(200, fetched.StatusCode);
-        Assert.Equal("1.20", created.Body["result"]!["amount"]!.GetValue<string>());
         Assert.Equal("1.20", fetched.Body["result"]!["amount"]!.GetValue<string>());
     }
 

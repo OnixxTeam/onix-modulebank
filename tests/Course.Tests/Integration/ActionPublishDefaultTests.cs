@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using Course.Core.Actions;
 
 namespace Course.Tests.Integration;
 
@@ -94,8 +93,7 @@ public sealed class ActionPublishDefaultTests(ApiFactory factory)
         var action = NewAction();
         await PublishAsync(action, version: 1, isDefault: true);
 
-        var manifest = ActionManifest.FromDocument(TestManifests.Probe(action, 1, isDefault: true, timeoutMs: 6000));
-        var refused = await factory.Postgres.Publisher.PublishAsync(manifest, CancellationToken.None);
+        var refused = await ProbeRoute.PublishRawAsync(factory, action, 1, isDefault: true, timeoutMs: 6000);
 
         Assert.Equal("error", refused["status"]!.GetValue<string>());
         Assert.Equal("manifest.conflict", refused["code"]!.GetValue<string>());
@@ -111,38 +109,22 @@ public sealed class ActionPublishDefaultTests(ApiFactory factory)
         await PublishAsync(action, version: 2, isDefault: false);
 
         var activated = await factory.Postgres.Publisher.ActivateAsync(
-            "testfixture", action, 2, CancellationToken.None);
+            ProbeRoute.Module, action, 2, CancellationToken.None);
 
         Assert.Equal("ok", activated["status"]!.GetValue<string>());
         Assert.Equal(2, await DefaultVersionAsync(action));
     }
 
-    private static string NewAction() => $"publish_probe_{Guid.NewGuid():N}"[..24];
+    private static string NewAction() => ProbeRoute.NewAction("publish_probe");
 
-    private async Task<JsonNode> PublishAsync(string action, int version, bool isDefault)
-    {
-        var result = await PublishRawAsync(action, version, isDefault);
-        Assert.Equal("ok", result["status"]!.GetValue<string>());
-        return result;
-    }
+    private Task<JsonNode> PublishAsync(string action, int version, bool isDefault) =>
+        ProbeRoute.PublishAsync(factory, action, version, isDefault);
 
     private Task<JsonNode> PublishRawAsync(string action, int version, bool isDefault) =>
-        factory.Postgres.Publisher.PublishAsync(
-            ActionManifest.FromDocument(TestManifests.Probe(action, version, isDefault)), CancellationToken.None);
+        ProbeRoute.PublishRawAsync(factory, action, version, isDefault);
 
-    private async Task<int?> DefaultVersionAsync(string action)
-    {
-        var version = await factory.Postgres.ScalarAsOwnerAsync<object>(
-            "select coalesce((select version from api.action_catalog "
-            + "where module = 'testfixture' and action = @action and is_default), -1)",
-            ("action", action));
+    private Task<int?> DefaultVersionAsync(string action) => ProbeRoute.DefaultVersionAsync(factory, action);
 
-        return (int)version == -1 ? null : (int)version;
-    }
-
-    private async Task<int> VersionCountAsync(string action, int version) =>
-        (int)await factory.Postgres.ScalarAsOwnerAsync<long>(
-            "select count(*) from api.action_catalog "
-            + "where module = 'testfixture' and action = @action and version = @version",
-            ("action", action), ("version", version));
+    private Task<int> VersionCountAsync(string action, int version) =>
+        ProbeRoute.VersionCountAsync(factory, action, version);
 }

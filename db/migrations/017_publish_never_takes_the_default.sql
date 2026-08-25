@@ -82,4 +82,5 @@ end;
 $$;
 
 revoke all on function api.publish_action(jsonb) from public;
+grant usage on schema api to course_publisher;
 grant execute on function api.publish_action(jsonb) to course_publisher;

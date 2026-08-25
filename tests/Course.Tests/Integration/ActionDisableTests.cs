@@ -1,4 +1,4 @@
-using Course.Core.Actions;
+using System.Text.Json.Nodes;
 
 namespace Course.Tests.Integration;
 
@@ -12,12 +12,12 @@ public sealed class ActionDisableTests(ApiFactory factory)
     [Fact]
     public async Task DisablingTheDefault_WithoutReplacement_IsRefused()
     {
-        var action = $"disable_probe_{Guid.NewGuid():N}"[..24];
+        var action = ProbeRoute.NewAction("disable_probe");
         await PublishAsync(action, version: 1, isDefault: true);
         await PublishAsync(action, version: 2, isDefault: false);
 
         var refused = await factory.Postgres.Publisher.DisableAsync(
-            "testfixture", action, 1, null, CancellationToken.None);
+            ProbeRoute.Module, action, 1, null, CancellationToken.None);
 
         Assert.Equal("error", refused["status"]!.GetValue<string>());
         Assert.Equal("action.replacement_required", refused["code"]!.GetValue<string>());
@@ -34,12 +34,12 @@ public sealed class ActionDisableTests(ApiFactory factory)
     [Fact]
     public async Task DisablingTheDefault_WithReplacement_PromotesTheReplacement()
     {
-        var action = $"disable_probe_{Guid.NewGuid():N}"[..24];
+        var action = ProbeRoute.NewAction("disable_probe");
         await PublishAsync(action, version: 1, isDefault: true);
         await PublishAsync(action, version: 2, isDefault: false);
 
         var disabled = await factory.Postgres.Publisher.DisableAsync(
-            "testfixture", action, 1, 2, CancellationToken.None);
+            ProbeRoute.Module, action, 1, 2, CancellationToken.None);
 
         Assert.Equal("ok", disabled["status"]!.GetValue<string>());
 
@@ -56,19 +56,15 @@ public sealed class ActionDisableTests(ApiFactory factory)
     [Fact]
     public async Task DisablingTheOnlyVersion_NeedsNoReplacement()
     {
-        var action = $"disable_probe_{Guid.NewGuid():N}"[..24];
+        var action = ProbeRoute.NewAction("disable_probe");
         await PublishAsync(action, version: 1, isDefault: true);
 
         var disabled = await factory.Postgres.Publisher.DisableAsync(
-            "testfixture", action, 1, null, CancellationToken.None);
+            ProbeRoute.Module, action, 1, null, CancellationToken.None);
 
         Assert.Equal("ok", disabled["status"]!.GetValue<string>());
     }
 
-    private async Task PublishAsync(string action, int version, bool isDefault)
-    {
-        var manifest = ActionManifest.FromDocument(TestManifests.Probe(action, version, isDefault));
-        var result = await factory.Postgres.Publisher.PublishAsync(manifest, CancellationToken.None);
-        Assert.Equal("ok", result["status"]!.GetValue<string>());
-    }
+    private Task<JsonNode> PublishAsync(string action, int version, bool isDefault) =>
+        ProbeRoute.PublishAsync(factory, action, version, isDefault);
 }

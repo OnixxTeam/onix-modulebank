@@ -88,7 +88,7 @@ internal static class TestManifests
     // transitions cannot disturb the default version any other test calls
     // through. Points at the same echo_v1 target: what is under test is the
     // catalog transition, not anything the target does.
-    public static JsonNode Probe(string action, int version, bool isDefault, int timeoutMs = 5000) => JsonNode.Parse($$"""
+    public static JsonNode Probe(string action, int version, bool isDefault, bool enabled = true, int timeoutMs = 5000) => JsonNode.Parse($$"""
         {
           "contract_version": "course-1",
           "module": "testfixture",
@@ -104,7 +104,7 @@ internal static class TestManifests
           "idempotency_mode": "none",
           "idempotency_scope": "none",
           "timeout_ms": {{timeoutMs}},
-          "enabled": true,
+          "enabled": {{(enabled ? "true" : "false")}},
           "is_default": {{(isDefault ? "true" : "false")}}
         }
         """)!;
