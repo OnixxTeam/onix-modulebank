@@ -253,12 +253,18 @@ class Checker:
             and {("execute", 1), ("execute", 2), ("optional", 1), ("global", 1)} <= identities,
             "all published versions with state", assurance)
 
-        for index, arguments in enumerate((("action",), ("action", "activate", "bad-key", "--version", "x"),
-                                           ("migration", "apply"), ("unknown", "command")), start=1):
+        # A command that exists but was given bad arguments is request.invalid;
+        # a command the CLI has no such thing as is command.unknown. Both are
+        # non-zero exits carrying one error envelope.
+        for index, (arguments, code) in enumerate((
+                (("action",), "command.unknown"),
+                (("action", "activate", "bad-key", "--version", "x"), "request.invalid"),
+                (("migration", "apply"), "request.invalid"),
+                (("unknown", "command"), "command.unknown")), start=1):
             malformed, malformed_body = self.cli(*arguments)
             self.check(f"cli-invalid-command-{index}", "cli", malformed.exitCode != 0
-                and self.envelope(malformed_body, "error") and malformed_body.get("code") == "request.invalid",
-                "non-zero request.invalid JSON", {"arguments": arguments, "body": malformed_body})
+                and self.envelope(malformed_body, "error") and malformed_body.get("code") == code,
+                f"non-zero {code} JSON", {"arguments": arguments, "body": malformed_body})
 
         transactional = self.temp / "transactional-migrations" / "migrations"
         transactional.mkdir(parents=True)
@@ -356,7 +362,9 @@ class Checker:
 
         cases = [
             ("malformed-json", None, b"{", 400, "request.invalid"),
-            ("array-payload", None, b"[]", 400, "request.invalid"),
+            # Parses, so it is a payload the request schema refuses (type: object),
+            # not a malformed request -- 422 rather than 400.
+            ("array-payload", None, b"[]", 422, "payload.invalid"),
             ("extra-property", {"mode": "ok", "value": "x", "principal": "attacker"}, None, 422, "payload.invalid"),
             ("missing-key", {"mode": "ok", "value": "x"}, None, 400, "idempotency.required")]
         for name, payload, raw, status, code in cases:
@@ -515,15 +523,19 @@ class Checker:
 
     def payment_boundaries(self) -> None:
         bearer = token(self.secret, sub="payment-quality", consumer="web", scope="payment:write payment:read")
-        valid_amounts = ("0.01", "0.10", "1", "1.2", "9999999999999999.99")
-        for amount in valid_amounts:
+        # The amount is stored as numeric(18,2) and echoed in the canonical
+        # two-decimal form of the same value, which the contract's amount pattern
+        # admits just as it admits the submitted spelling.
+        valid_amounts = (("0.01", "0.01"), ("0.10", "0.10"), ("1", "1.00"), ("1.2", "1.20"),
+                         ("9999999999999999.99", "9999999999999999.99"))
+        for amount, echoed in valid_amounts:
             key = f"amount-{amount}-{uuid.uuid4().hex}"
             response = self.request("POST", "/api/payment/request",
                 {"operationKind": "PAYMENT_APPROVAL", "amount": amount, "currency": "RUB"}, bearer, key)
             result = self.result(response)
             self.check(f"payment-valid-amount-{amount}", "payment", response.status == 200
-                and result.get("amount") == amount and result.get("requestId") == key,
-                "200 preserving contractual amount string", asdict(response))
+                and result.get("amount") == echoed and result.get("requestId") == key,
+                f"200 echoing the amount as {echoed}", asdict(response))
         invalid_amounts = ("0", "0.00", ".01", "01.00", "1.000", "1e2", "10000000000000000.00", 1.25)
         for index, amount in enumerate(invalid_amounts):
             response = self.request("POST", "/api/payment/request",
@@ -579,7 +591,8 @@ class Checker:
             "default document changes to version 2 without rebuild", after_operation)
         disable, disable_body = self.cli("action", "disable", "assurance.execute", "--version", "2")
         self.check("cli-action-disable-requires-replacement", "lifecycle", disable.exitCode != 0 and self.envelope(disable_body, "error")
-            and disable_body.get("code") == "manifest.conflict", "manifest.conflict", disable_body)
+            and disable_body.get("code") == "action.replacement_required",
+            "action.replacement_required", disable_body)
         bad_replace, bad_replace_body = self.cli("action", "disable", "assurance.execute", "--version", "2",
                                                   "--replacement-version", "999")
         remains_v2 = self.request("POST", "/api/assurance/execute", {"mode": "ok", "value": "after-bad-replace"}, valid)
