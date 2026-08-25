@@ -38,6 +38,28 @@ internal static class ActionClient
         var text = await response.Content.ReadAsStringAsync();
         return new ActionResponse((int)response.StatusCode, JsonNode.Parse(text)!);
     }
+
+    // Same request, but with the body written out by hand: property order and
+    // whitespace are what some tests are about, and a JsonNode round trip would
+    // normalise exactly those away.
+    public static async Task<ActionResponse> PostRawActionAsync(
+        this HttpClient client, string path, string token, string body, string? idempotencyKey = null)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        if (idempotencyKey is not null)
+        {
+            request.Headers.Add("Idempotency-Key", idempotencyKey);
+        }
+
+        using var response = await client.SendAsync(request);
+        var text = await response.Content.ReadAsStringAsync();
+        return new ActionResponse((int)response.StatusCode, JsonNode.Parse(text)!);
+    }
 }
 
 internal sealed record ActionResponse(int StatusCode, JsonNode Body);

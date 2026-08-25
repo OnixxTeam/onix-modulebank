@@ -27,7 +27,42 @@ public sealed class IdempotencyTests(ApiFactory factory)
 
         Assert.Equal(200, first.StatusCode);
         Assert.Equal(200, second.StatusCode);
-        Assert.Equal(first.Body["result"]!.ToJsonString(), second.Body["result"]!.ToJsonString());
+
+        // contract-reference matrix: "Повтор с тем же key и payload -> Исходный
+        // успешный envelope". The whole envelope, meta included -- a replay hands
+        // back what the first call returned rather than a lookalike stamped with a
+        // fresh correlationId.
+        Assert.Equal(first.Body.ToJsonString(), second.Body.ToJsonString());
+
+        var operationId = Guid.Parse(first.Body["result"]!["operationId"]!.GetValue<string>());
+
+        var eventCount = await factory.Postgres.ScalarAsOwnerAsync<long>(
+            "select count(*) from core.operation_events where operation_id = @operationId",
+            ("operationId", operationId));
+
+        Assert.Equal(1, eventCount);
+    }
+
+    // The stored envelope is keyed on a hash of the payload, so a replay that
+    // differs only in property order or whitespace is still the same request and
+    // replays rather than executing again.
+    [Fact]
+    public async Task ReplayWithReorderedPayload_ReplaysTheOriginalEnvelope()
+    {
+        using var client = factory.CreateClient();
+        var token = ApiFactory.CreateToken("candidate-client", "web", "payment:write payment:read");
+        var idempotencyKey = $"idem-canonical-{Guid.NewGuid():N}";
+
+        var first = await client.PostRawActionAsync(
+            "/api/payment/request", token,
+            """{"operationKind":"PAYMENT_EXECUTION","amount":"10.00","currency":"RUB"}""", idempotencyKey);
+        var second = await client.PostRawActionAsync(
+            "/api/payment/request", token,
+            """{ "currency" : "RUB", "amount" : "10.00", "operationKind" : "PAYMENT_EXECUTION" }""", idempotencyKey);
+
+        Assert.Equal(200, first.StatusCode);
+        Assert.Equal(200, second.StatusCode);
+        Assert.Equal(first.Body.ToJsonString(), second.Body.ToJsonString());
 
         var operationId = Guid.Parse(first.Body["result"]!["operationId"]!.GetValue<string>());
 

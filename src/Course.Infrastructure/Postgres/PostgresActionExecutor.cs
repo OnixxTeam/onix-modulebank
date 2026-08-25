@@ -100,7 +100,12 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return ActionExecutionResult.Success(manifest.Version, outcome, result);
+
+        // Only a replayed envelope carries correlationId: api.invoke stamps it onto
+        // the stored copy (migration 018), never onto a fresh target result.
+        return envelope["correlationId"]?.GetValue<string>() is { } replayed && Guid.TryParse(replayed, out var original)
+            ? ActionExecutionResult.Replay(manifest.Version, outcome, result, original)
+            : ActionExecutionResult.Success(manifest.Version, outcome, result);
     }
 
     private static async Task<RuntimeManifest?> ReadManifestAsync(

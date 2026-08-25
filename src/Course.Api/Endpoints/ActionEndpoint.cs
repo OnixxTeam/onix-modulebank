@@ -102,7 +102,10 @@ public static partial class ActionEndpoint
             return;
         }
 
-        await ActionEnvelopeWriter.WriteSuccessAsync(httpContext, result.Outcome!, result.Result!, correlationId, result.ActionVersion!.Value);
+        // A replay answers with the first call's envelope, so meta carries that
+        // call's correlationId; the log above still reports this request's own.
+        await ActionEnvelopeWriter.WriteSuccessAsync(
+            httpContext, result.Outcome!, result.Result!, result.ReplayedCorrelationId ?? correlationId, result.ActionVersion!.Value);
     }
 
     private static string HashPayload(JsonNode payload) =>
