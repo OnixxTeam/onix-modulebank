@@ -5,6 +5,10 @@
     <ProjectReference Include="..\Course.Infrastructure\Course.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\contracts\course-1\action-manifest.schema.json" LogicalName="action-manifest.schema.json" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
   </PropertyGroup>

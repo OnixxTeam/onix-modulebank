@@ -1,0 +1,36 @@
+{
+  "contract_version": "course-1",
+  "module": "assurance",
+  "action": "execute",
+  "version": 2,
+  "http_method": "POST",
+  "target_schema": "quality_assurance",
+  "target_function": "execute_v2",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["mode", "value"],
+    "properties": {
+      "mode": {"const": "ok"},
+      "value": {"type": "string", "minLength": 1, "maxLength": 64}
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["value", "revision"],
+    "properties": {
+      "value": {"type": "string"},
+      "revision": {"const": "v2"}
+    }
+  },
+  "outcomes": ["ACCEPTED"],
+  "required_policy": ["assurance:execute", "tenant:read"],
+  "idempotency_mode": "none",
+  "idempotency_scope": "none",
+  "timeout_ms": 1000,
+  "enabled": false,
+  "is_default": false
+}

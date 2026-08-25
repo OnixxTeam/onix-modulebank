@@ -6,17 +6,17 @@ help:  ## показать доступные команды
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	 | awk -F':.*?## ' '{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-start_local_db:  ## поднять только postgres из compose (появится в тикете 02)
-	@echo "start_local_db: compose появится в тикете 02"
+start_local_db:  ## поднять только postgres из compose (публикует 5432 на хост)
+	docker compose up -d postgres
 
 start_local_api:  ## запустить Course.Api локально против local db
-	dotnet run --project src/Course.Api
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Api
 
 start_local_gateway:  ## запустить Course.Gateway локально
-	dotnet run --project src/Course.Gateway
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Gateway
 
-start_local_cli:  ## запустить Course.Cli локально
-	dotnet run --project src/Course.Cli
+start_local_cli:  ## запустить Course.Cli локально; ARGS="migration apply" передаёт команду
+	set -a && . ./.env && set +a && COURSE_DB_HOST=localhost dotnet run --project src/Course.Cli -- $(ARGS)
 
 format:  ## применить dotnet format
 	dotnet format $(SOLUTION)
@@ -30,20 +30,21 @@ test:  ## прогнать тесты
 
 ci: lint test  ## lint + test
 
-start_prod:  ## поднять полный стек через compose (появится в тикете 02)
-	@echo "start_prod: compose появится в тикете 02"
+start_prod:  ## поднять полный стек через compose
+	docker compose up -d --build
 
 stop_prod:  ## остановить полный стек
-	@echo "stop_prod: compose появится в тикете 02"
+	docker compose down
 
 check:  ## прогнать проверку задания
 	./check.sh
 
-logs:  ## логи compose-стека
-	@echo "logs: compose появится в тикете 02"
+SERVICE ?= postgres
+logs:  ## логи compose-стека, SERVICE=<имя> выбирает сервис
+	docker compose logs -f $(SERVICE)
 
-psql:  ## psql-сессия в контейнер postgres
-	@echo "psql: compose появится в тикете 02"
+psql:  ## psql-сессия в контейнер postgres; ARGS="-c '...'" передаёт флаги psql
+	docker compose exec postgres psql -U postgres -d course $(ARGS)
 
 clean:  ## удалить bin/ и obj/
 	find . -type d \( -name bin -o -name obj \) -not -path './.scratch/*' -prune -exec rm -rf {} +
