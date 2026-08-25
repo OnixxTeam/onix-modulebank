@@ -19,7 +19,12 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d course"]
+      # -h 127.0.0.1 forces the TCP check dependents actually need. Without it
+      # pg_isready uses the unix socket, which the temporary server the entrypoint
+      # runs during initdb (db/init/00-roles.sh) also answers -- while
+      # listen_addresses is still empty. The container then reported healthy
+      # mid-init, bootstrap connected over TCP and got "Connection refused".
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d course"]
       interval: 2s
       timeout: 3s
       retries: 30

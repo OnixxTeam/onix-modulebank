@@ -21,10 +21,18 @@ public interface IActionExecutor
         CancellationToken cancellationToken);
 }
 
-public sealed record ActionExecutionResult(bool IsSuccess, int? ActionVersion, string? Outcome, JsonNode? Result, ActionError? Error)
+public sealed record ActionExecutionResult(
+    bool IsSuccess, int? ActionVersion, string? Outcome, JsonNode? Result, ActionError? Error, Guid? ReplayedCorrelationId = null)
 {
     public static ActionExecutionResult Success(int actionVersion, string outcome, JsonNode result) =>
         new(true, actionVersion, outcome, result, null);
+
+    // A replay hands back the envelope the first call produced, correlationId
+    // included (contract-reference: "Повтор с тем же key и payload -> Исходный
+    // успешный envelope"), so the endpoint renders meta from this instead of the
+    // id it minted for the current request.
+    public static ActionExecutionResult Replay(int actionVersion, string outcome, JsonNode result, Guid correlationId) =>
+        new(true, actionVersion, outcome, result, null, correlationId);
 
     public static ActionExecutionResult Failure(ActionError error, int? actionVersion = null) =>
         new(false, actionVersion, null, null, error);

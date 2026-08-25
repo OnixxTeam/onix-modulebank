@@ -23,10 +23,13 @@ public sealed class RollbackTests(ApiFactory factory)
 
         var response = await client.PostActionAsync("/api/testfixture/error", token, new JsonObject());
 
-        // business.rejected is outside ActionError's fixed HTTP matrix, so it
-        // collapses to internal.error/500 rather than inventing a status.
-        Assert.Equal(500, response.StatusCode);
-        Assert.Equal("internal.error", response.Body["code"]!.GetValue<string>());
+        // business.rejected is outside ActionError's fixed HTTP matrix, but it is a
+        // controlled domain rejection: it keeps its own code at 400 instead of
+        // being reported as an unexpected runtime failure.
+        Assert.Equal(400, response.StatusCode);
+        Assert.Equal("business.rejected", response.Body["code"]!.GetValue<string>());
+        Assert.Equal(
+            "fixture forced rejection after a domain write", response.Body["message"]!.GetValue<string>());
 
         var correlationId = Guid.Parse(response.Body["meta"]!["correlationId"]!.GetValue<string>());
 

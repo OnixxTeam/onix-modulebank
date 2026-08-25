@@ -19,15 +19,45 @@ public sealed class ErrorMappingTests
         Assert.Equal("operation not found", error.Message);
     }
 
-    // A business code outside the matrix that does not end in .not_found still collapses
-    // into internal.error -- a target cannot pick its own status by inventing a code.
+    // contract-reference's matrix: "Target вернул status=error -> Контролируемый
+    // error envelope". A deliberate domain rejection is the caller's problem, not
+    // a runtime failure, so it keeps the target's own code at 400 rather than
+    // becoming the 500 "unexpected runtime failure" that means the opposite.
     [Fact]
-    public void UnknownBusinessCode_StillMapsToInternalError()
+    public void BusinessCode_MapsToBadRequestKeepingCodeAndMessage()
     {
-        var error = ActionError.ForCode("demo.whatever", "forced failure", retryable: false);
+        var error = ActionError.ForCode("demo.rejected", "forced failure", retryable: false);
+
+        Assert.Equal(400, error.HttpStatus);
+        Assert.Equal("demo.rejected", error.Code);
+        Assert.Equal("forced failure", error.Message);
+    }
+
+    [Fact]
+    public void BusinessCode_KeepsRetryable()
+    {
+        var error = ActionError.ForCode("demo.busy", "try later", retryable: true);
+
+        Assert.Equal(400, error.HttpStatus);
+        Assert.True(error.Retryable);
+    }
+
+    // The door opens for dotted business codes only. Anything that is not shaped
+    // like one cannot have come from a target that knows the contract, so it is a
+    // runtime failure and says so.
+    [Theory]
+    [InlineData("whatever")]
+    [InlineData("Demo.Rejected")]
+    [InlineData("demo rejected")]
+    [InlineData("demo.")]
+    [InlineData("")]
+    public void MalformedCode_StillMapsToInternalError(string code)
+    {
+        var error = ActionError.ForCode(code, "forced failure", retryable: false);
 
         Assert.Equal(500, error.HttpStatus);
         Assert.Equal("internal.error", error.Code);
+        Assert.DoesNotContain("forced failure", error.Message);
     }
 
     // Checked before the generic IsTransient branch: PostgresException is itself

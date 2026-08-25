@@ -64,6 +64,22 @@ public sealed class CatalogOpenApiBuilder(NpgsqlDataSource dataSource) : IOpenAp
             ["post"] = new JsonObject
             {
                 ["x-outcomes"] = row["outcomes"]!.DeepClone(),
+                // The only version selector a caller has (contract-reference:
+                // "Версия передаётся только в X-Action-Version"), pinned to the
+                // version this operation was built from: without it the default
+                // document and the exact-version documents describe different
+                // contracts under the same path with nothing to tell them apart.
+                // Optional, because omitting the header selects the default.
+                ["parameters"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["name"] = "X-Action-Version",
+                        ["in"] = "header",
+                        ["required"] = false,
+                        ["schema"] = new JsonObject { ["const"] = row["version"]!.GetValue<int>() },
+                    },
+                },
                 ["requestBody"] = new JsonObject
                 {
                     ["content"] = new JsonObject
@@ -87,10 +103,16 @@ public sealed class CatalogOpenApiBuilder(NpgsqlDataSource dataSource) : IOpenAp
         return ($"/api/{module}/{action}", operation);
     }
 
+    // 3.1, not 3.0.x: in 3.1 the Schema Object *is* JSON Schema 2020-12, which is
+    // the dialect request_schema/response_schema are already written in and stored
+    // as (contracts/course-1/*.schema.json). Under 3.0.x every one of those inlined
+    // schemas -- and the version parameter's `const` -- is a keyword the Schema
+    // Object does not define, so the document only became conformant by saying
+    // which dialect it has been emitting all along.
     private static JsonObject NewDocument() =>
         new JsonObject
         {
-            ["openapi"] = "3.0.3",
+            ["openapi"] = "3.1.0",
             ["info"] = new JsonObject { ["title"] = "Course actions", ["version"] = "1" },
             ["paths"] = new JsonObject(),
         };
