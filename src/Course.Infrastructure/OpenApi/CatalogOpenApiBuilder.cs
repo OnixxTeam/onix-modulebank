@@ -64,6 +64,22 @@ public sealed class CatalogOpenApiBuilder(NpgsqlDataSource dataSource) : IOpenAp
             ["post"] = new JsonObject
             {
                 ["x-outcomes"] = row["outcomes"]!.DeepClone(),
+                // The only version selector a caller has (contract-reference:
+                // "Версия передаётся только в X-Action-Version"), pinned to the
+                // version this operation was built from: without it the default
+                // document and the exact-version documents describe different
+                // contracts under the same path with nothing to tell them apart.
+                // Optional, because omitting the header selects the default.
+                ["parameters"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["name"] = "X-Action-Version",
+                        ["in"] = "header",
+                        ["required"] = false,
+                        ["schema"] = new JsonObject { ["const"] = row["version"]!.GetValue<int>() },
+                    },
+                },
                 ["requestBody"] = new JsonObject
                 {
                     ["content"] = new JsonObject
