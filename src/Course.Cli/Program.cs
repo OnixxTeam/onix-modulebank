@@ -56,10 +56,15 @@ try
                 CancellationToken.None);
             break;
         case "flow validate":
-            var publisher = new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD"));
-            var flowValidator = new WorkflowMapValidator(
-                new JsonSchemaValidator(), MapSchema.Load(), new ActionPublisherCatalog(publisher), WorkerScopes());
-            envelope = await FlowValidateCommand.ExecuteAsync(parsed, flowValidator, CancellationToken.None);
+            envelope = await FlowValidateCommand.ExecuteAsync(
+                parsed,
+                new WorkflowMapValidator(
+                    new JsonSchemaValidator(),
+                    MapSchema.Load(),
+                    new ActionPublisherCatalog(
+                        new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD"))),
+                    WorkerScopes()),
+                CancellationToken.None);
             break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");

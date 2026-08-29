@@ -5,11 +5,11 @@ using Workflow.Core.Maps;
 
 namespace Workflow.Core.Validation;
 
-// The full course-1 map pipeline in the order the ticket lays the rules out:
-// JSON Schema shape, then graph structure, then outcome coverage, catalog
-// rules, mapping rules, retry rules. Every later phase assumes the schema
-// already passed -- MapParser trusts required fields exist -- so a schema
-// failure short-circuits before parsing runs at all. Every rule family after
+// The full course-1 map pipeline: JSON Schema shape, then graph structure,
+// then outcome coverage, catalog rules, mapping rules, retry rules. Every
+// later phase assumes the schema already passed -- MapParser trusts required
+// fields exist -- so a schema failure short-circuits before parsing runs at
+// all. Every rule family after
 // that runs to completion and every violation is collected: a caller reporting
 // only the first one still knows every other rule ran clean for this map.
 public sealed class WorkflowMapValidator(

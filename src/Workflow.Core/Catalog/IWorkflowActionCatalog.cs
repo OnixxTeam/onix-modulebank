@@ -11,7 +11,7 @@ public sealed record WorkflowActionCatalogEntry(
 // The catalog read `flow validate`/`flow publish` need: existence, enabled,
 // declared outcomes and required policy for one action version. The worker
 // never implements this -- claim_jobs hands it the pinned action's contract
-// directly (week 2 decision log #10), so no second catalog read exists there.
+// directly, so no second catalog read exists there.
 public interface IWorkflowActionCatalog
 {
     Task<WorkflowActionCatalogEntry?> FindAsync(string moduleName, string actionName, int version, CancellationToken cancellationToken);

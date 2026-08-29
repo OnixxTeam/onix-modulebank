@@ -9,10 +9,16 @@ namespace Workflow.Core.Catalog;
 // project different fields out of them.
 public sealed class ActionPublisherCatalog(IActionPublisher publisher) : IWorkflowActionCatalog
 {
+    // A map with several automatic steps calls FindAsync once per step; the
+    // catalog cannot change mid-validate, so cache the one full-table read
+    // instead of reissuing api.list_actions() per step.
+    private Task<JsonNode>? cachedList;
+
     public async Task<WorkflowActionCatalogEntry?> FindAsync(
         string moduleName, string actionName, int version, CancellationToken cancellationToken)
     {
-        var raw = await publisher.ListAsync(cancellationToken);
+        cachedList ??= publisher.ListAsync(cancellationToken);
+        var raw = await cachedList;
 
         foreach (var entry in raw!.AsArray())
         {

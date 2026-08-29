@@ -43,7 +43,7 @@ public sealed record StepDefinition(
         StepKind.WaitSignal => [WaitOutcome!],
         StepKind.Manual => AllowedOutcomes,
         StepKind.End => [],
-        _ => throw new ArgumentOutOfRangeException(nameof(catalogOutcomes)),
+        _ => throw new InvalidOperationException($"unknown step kind: {Kind}"),
     };
 }
 
