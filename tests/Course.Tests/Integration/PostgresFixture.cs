@@ -54,6 +54,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.get.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
+        await PublishAndActivateAsync(TestManifests.EchoContext());
     }
 
     public async Task DisposeAsync() => await container.DisposeAsync();
