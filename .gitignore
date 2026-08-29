@@ -12,3 +12,6 @@ quality-report.json
 
 # локальные артефакты планирования
 .scratch/
+
+# клон репозитория задания, не часть решения
+moduledev-week-2-workflow-task/
