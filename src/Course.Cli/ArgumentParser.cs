@@ -9,7 +9,7 @@ public sealed class ArgumentParserException(string message) : Exception(message)
 // corrupt it.
 public static class ArgumentParser
 {
-    private static readonly HashSet<string> CommandGroups = new(StringComparer.Ordinal) { "migration", "action" };
+    private static readonly HashSet<string> CommandGroups = new(StringComparer.Ordinal) { "migration", "action", "flow" };
 
     public static ParsedCommand Parse(string[] args)
     {
