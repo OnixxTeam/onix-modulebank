@@ -61,6 +61,29 @@ internal static class TestManifests
         }
         """)!;
 
+    // Reflects the trusted context back as the result (testfixture.echo_context_v1),
+    // so ExecutorTransactionTests can assert on exactly what api.invoke received.
+    public static JsonNode EchoContext() => JsonNode.Parse($$"""
+        {
+          "contract_version": "course-1",
+          "module": "testfixture",
+          "action": "echo_context",
+          "version": 1,
+          "http_method": "POST",
+          "target_schema": "testfixture",
+          "target_function": "echo_context_v1",
+          "request_schema": {{GenericObjectSchema}},
+          "response_schema": {{GenericObjectSchema}},
+          "outcomes": ["ECHOED"],
+          "required_policy": [],
+          "idempotency_mode": "none",
+          "idempotency_scope": "none",
+          "timeout_ms": 5000,
+          "enabled": true,
+          "is_default": true
+        }
+        """)!;
+
     // Published mid-test by CatalogTests itself (not by PostgresFixture's setup)
     // to prove a brand-new action is callable without rebuilding Course.Api.
     public static JsonNode Echo() => JsonNode.Parse($$"""

@@ -8,13 +8,13 @@ using NpgsqlTypes;
 
 namespace Course.Infrastructure.Postgres;
 
-// The entire step 5-13 pipeline from spec §5.1 (BEGIN .. manifest .. idempotency/policy
-// checks .. statement timeout .. request validation .. api.invoke .. envelope/response
-// validation .. COMMIT) lives in this one method. Every early return rolls the
-// transaction back via `await using` -- except the status=="error" branch below, which
-// commits first: migration 015's api.invoke already rolled the domain effect back to a
-// savepoint for that case, leaving only the dispatch row to persist as the technical
-// audit trail (contract-reference: "Target вернул status=error" row).
+// The resource-owning entry point: opens the connection and transaction, runs the
+// pipeline (step 5-13 of spec §5.1) inside them, and decides whether to commit.
+// Every failure rolls the transaction back via `await using` -- except when the
+// pipeline reports TargetReturnedError, which commits first: migration 015's
+// api.invoke already rolled the domain effect back to a savepoint for that case,
+// leaving only the dispatch row to persist as the technical audit trail
+// (contract-reference: "Target вернул status=error" row).
 public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaValidator validator, TimeProvider timeProvider)
     : IActionExecutor
 {
@@ -31,29 +31,70 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
+        var outcome = await ExecuteInTransactionAsync(
+            connection, transaction, moduleName, actionName, explicitVersion, claims, correlationId, requestId, payload,
+            callerContext: null, cancellationToken);
+
+        if (outcome.Result.IsSuccess || outcome.TargetReturnedError)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        return outcome.Result;
+    }
+
+    // The same pipeline, running inside a connection and transaction the caller
+    // already owns: it never commits or rolls back, only returns what happened,
+    // because week 1's network path and a week-2 worker commit on different
+    // conditions for TargetReturnedError (see ExecuteAsync above vs. a worker that
+    // must retry without leaving a dispatch row behind).
+    public async Task<ActionPipelineOutcome> ExecuteInTransactionAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string moduleName,
+        string actionName,
+        int? explicitVersion,
+        VerifiedClaims claims,
+        Guid correlationId,
+        string? requestId,
+        JsonNode payload,
+        ActionCallerContext? callerContext,
+        CancellationToken cancellationToken)
+    {
+        // Every early exit here is a rejection before (or instead of) invoking the
+        // target, so the transaction owner must never commit it -- only the
+        // TargetReturnedError branch below sets that flag true.
+        static ActionPipelineOutcome Rejected(ActionError error, int? actionVersion = null) =>
+            new(ActionExecutionResult.Failure(error, actionVersion), TargetReturnedError: false);
+
         var manifest = await ReadManifestAsync(connection, transaction, moduleName, actionName, explicitVersion, cancellationToken);
         if (manifest is null)
         {
-            return ActionExecutionResult.Failure(ActionError.ActionNotFound());
+            return Rejected(ActionError.ActionNotFound());
         }
 
         if (manifest.IdempotencyMode == "required" && requestId is null)
         {
-            return ActionExecutionResult.Failure(ActionError.IdempotencyRequired(), manifest.Version);
+            return Rejected(ActionError.IdempotencyRequired(), manifest.Version);
         }
 
         if (!manifest.RequiredPolicy.All(claims.Scopes.Contains))
         {
-            return ActionExecutionResult.Failure(ActionError.AccessDenied(), manifest.Version);
+            return Rejected(ActionError.AccessDenied(), manifest.Version);
         }
 
-        await SetStatementTimeoutAsync(connection, transaction, manifest.TimeoutMs, cancellationToken);
+        // The caller's map, when it declares its own timeout, outranks the
+        // manifest's timeout_ms -- otherwise fall back to the manifest as before.
+        var timeoutMs = callerContext?.TimeoutOverride is { } timeoutOverride
+            ? (int)timeoutOverride.TotalMilliseconds
+            : manifest.TimeoutMs;
+
+        await SetStatementTimeoutAsync(connection, transaction, timeoutMs, cancellationToken);
 
         var payloadValidation = validator.Validate(manifest.RequestSchema, payload);
         if (!payloadValidation.IsValid)
         {
-            return ActionExecutionResult.Failure(
-                ActionError.PayloadInvalid(string.Join("; ", payloadValidation.Errors)), manifest.Version);
+            return Rejected(ActionError.PayloadInvalid(string.Join("; ", payloadValidation.Errors)), manifest.Version);
         }
 
         var context = new TrustedContext(
@@ -62,13 +103,17 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             claims.Scopes,
             correlationId,
             requestId,
-            timeProvider.GetUtcNow() + TimeSpan.FromMilliseconds(manifest.TimeoutMs));
+            timeProvider.GetUtcNow() + TimeSpan.FromMilliseconds(timeoutMs),
+            callerContext?.ProcessId,
+            callerContext?.JobId,
+            callerContext?.ExecutionId,
+            callerContext?.AttemptId);
 
         // Pass the version the manifest actually resolved to, not the caller's original
         // (possibly null/default) request -- so invoke can never resolve a different
         // version than the one C# just validated the payload against.
         var envelope = await InvokeAsync(
-            connection, transaction, moduleName, actionName, manifest.Version, context, payload, manifest.TimeoutMs, cancellationToken);
+            connection, transaction, moduleName, actionName, manifest.Version, context, payload, timeoutMs, cancellationToken);
 
         var status = envelope["status"]?.GetValue<string>();
         if (status == "error")
@@ -77,12 +122,8 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             var message = envelope["message"]?.GetValue<string>();
             var retryable = envelope["retryable"]?.GetValue<bool>() ?? false;
 
-            // api.invoke already rolled the domain effect (and any idempotency claim)
-            // back to a savepoint for this branch, so all that is left in the
-            // transaction is the dispatch row recording the technical failure --
-            // commit to keep it instead of discarding it with everything else.
-            await transaction.CommitAsync(cancellationToken);
-            return ActionExecutionResult.Failure(ActionError.ForCode(code, message, retryable), manifest.Version);
+            return new ActionPipelineOutcome(
+                ActionExecutionResult.Failure(ActionError.ForCode(code, message, retryable), manifest.Version), true);
         }
 
         var outcome = envelope["outcome"]?.GetValue<string>();
@@ -90,22 +131,22 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
 
         if (status != "ok" || outcome is null || result is null || !manifest.Outcomes.Contains(outcome))
         {
-            return ActionExecutionResult.Failure(ActionError.ContractViolation(), manifest.Version);
+            return Rejected(ActionError.ContractViolation(), manifest.Version);
         }
 
         var resultValidation = validator.Validate(manifest.ResponseSchema, result);
         if (!resultValidation.IsValid)
         {
-            return ActionExecutionResult.Failure(ActionError.ContractViolation(), manifest.Version);
+            return Rejected(ActionError.ContractViolation(), manifest.Version);
         }
-
-        await transaction.CommitAsync(cancellationToken);
 
         // Only a replayed envelope carries correlationId: api.invoke stamps it onto
         // the stored copy (migration 018), never onto a fresh target result.
-        return envelope["correlationId"]?.GetValue<string>() is { } replayed && Guid.TryParse(replayed, out var original)
+        var success = envelope["correlationId"]?.GetValue<string>() is { } replayed && Guid.TryParse(replayed, out var original)
             ? ActionExecutionResult.Replay(manifest.Version, outcome, result, original)
             : ActionExecutionResult.Success(manifest.Version, outcome, result);
+
+        return new ActionPipelineOutcome(success, false);
     }
 
     private static async Task<RuntimeManifest?> ReadManifestAsync(
@@ -165,6 +206,28 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             ["requestId"] = context.RequestId,
             ["deadline"] = context.Deadline.ToString("o"),
         };
+
+        // Only present when the caller set them (the workflow worker), so the
+        // network path serializes byte-identical context to before.
+        if (context.ProcessId is { } processId)
+        {
+            contextJson["processId"] = processId.ToString();
+        }
+
+        if (context.JobId is { } jobId)
+        {
+            contextJson["jobId"] = jobId.ToString();
+        }
+
+        if (context.ExecutionId is { } executionId)
+        {
+            contextJson["executionId"] = executionId;
+        }
+
+        if (context.AttemptId is { } attemptId)
+        {
+            contextJson["attemptId"] = attemptId.ToString();
+        }
 
         var envelope = await ExecuteScalarJsonAsync(
             connection,
