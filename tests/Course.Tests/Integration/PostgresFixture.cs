@@ -4,6 +4,7 @@ using Course.Infrastructure.Postgres;
 using Course.Tests.Support;
 using Npgsql;
 using Testcontainers.PostgreSql;
+using Workflow.Core.Publishing;
 
 namespace Course.Tests.Integration;
 
@@ -39,6 +40,8 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public IActionPublisher Publisher { get; private set; } = null!;
 
+    public IWorkflowFlowPublisher FlowPublisher { get; private set; } = null!;
+
     public async Task InitializeAsync()
     {
         await container.StartAsync();
@@ -49,6 +52,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         await ApplyFixtureScriptAsync(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "testfixture.sql"));
 
         Publisher = new PostgresActionPublisher(PublisherConnectionString);
+        FlowPublisher = new PostgresWorkflowFlowPublisher(PublisherConnectionString);
 
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.request.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.get.v1.action.json"));

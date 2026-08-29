@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Course.Core\Course.Core.csproj" />
+    <ProjectReference Include="..\Workflow.Core\Workflow.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
