@@ -3,6 +3,10 @@ using Course.Cli.Commands;
 using Course.Core.Cli;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Validation;
+using Workflow.Core.Catalog;
+using Workflow.Core.Maps;
+using Workflow.Core.Security;
+using Workflow.Core.Validation;
 
 try
 {
@@ -51,6 +55,17 @@ try
                 new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 CancellationToken.None);
             break;
+        case "flow validate":
+            envelope = await FlowValidateCommand.ExecuteAsync(
+                parsed,
+                new WorkflowMapValidator(
+                    new JsonSchemaValidator(),
+                    MapSchema.Load(),
+                    new ActionPublisherCatalog(
+                        new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD"))),
+                    WorkerScopes()),
+                CancellationToken.None);
+            break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
             Console.Out.Write(CliEnvelope.Fail("command.unknown", $"unknown command: {parsed.Name}").ToJson());
@@ -71,6 +86,12 @@ catch (Exception ex)
     Console.Error.WriteLine(ex);
     Console.Out.Write(CliEnvelope.Fail("internal.error", "unexpected CLI failure").ToJson());
     return 1;
+}
+
+static string[] WorkerScopes()
+{
+    var raw = Environment.GetEnvironmentVariable("WORKFLOW_WORKER_SCOPES");
+    return string.IsNullOrEmpty(raw) ? [.. WorkflowWorkerPrincipal.DefaultScopes] : raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 }
 
 static string BuildConnectionString(string username, string passwordEnvironmentVariable)

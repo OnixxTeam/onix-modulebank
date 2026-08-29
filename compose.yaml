@@ -4,6 +4,7 @@ x-course-db-env: &course-db-env
   COURSE_DB_NAME: course
   COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
   COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
+  WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read}
 
 services:
   postgres:

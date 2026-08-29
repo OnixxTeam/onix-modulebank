@@ -5,11 +5,13 @@ COPY Directory.Build.props ./
 COPY contracts/ contracts/
 COPY src/Course.Core/Course.Core.csproj src/Course.Core/
 COPY src/Course.Infrastructure/Course.Infrastructure.csproj src/Course.Infrastructure/
+COPY src/Workflow.Core/Workflow.Core.csproj src/Workflow.Core/
 COPY src/Course.Cli/Course.Cli.csproj src/Course.Cli/
 RUN dotnet restore src/Course.Cli/Course.Cli.csproj
 
 COPY src/Course.Core/ src/Course.Core/
 COPY src/Course.Infrastructure/ src/Course.Infrastructure/
+COPY src/Workflow.Core/ src/Workflow.Core/
 COPY src/Course.Cli/ src/Course.Cli/
 RUN dotnet publish src/Course.Cli/Course.Cli.csproj -c Release -o /app/publish --no-restore
 
