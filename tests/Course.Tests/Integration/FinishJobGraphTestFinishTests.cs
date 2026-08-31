@@ -44,10 +44,17 @@ public sealed class FinishJobGraphTestFinishTests
 
         Assert.Equal("ok", finish["status"]!.GetValue<string>());
 
-        var attemptState = await factory.Postgres.ScalarAsOwnerAsync<string>(
-            "select state from workflow.workflow_attempt where attempt_id = @attemptId",
-            ("attemptId", Guid.Parse(job["attemptId"]!.GetValue<string>())));
-        Assert.Equal("SUCCEEDED", attemptState);
+        var attemptRow = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(
+                "select state, result::text from workflow.workflow_attempt where attempt_id = @attemptId", connection);
+            command.Parameters.AddWithValue("attemptId", Guid.Parse(job["attemptId"]!.GetValue<string>()));
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            return (State: reader.GetString(0), Result: reader.GetString(1));
+        });
+        Assert.Equal("SUCCEEDED", attemptRow.State);
+        Assert.Equal("value", JsonNode.Parse(attemptRow.Result)!["echo"]!.GetValue<string>());
 
         var stepRow = await factory.Postgres.QueryAsOwnerAsync(async connection =>
         {

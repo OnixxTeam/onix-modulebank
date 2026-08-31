@@ -10,6 +10,13 @@
 -- outcome) returns before touching a row: workflow.lease_stale and
 -- workflow.unknown_outcome both leave job, process and step exactly as they
 -- were.
+
+-- The result is kept on the attempt that produced it, not only merged into
+-- process_data: process_data only ever holds the latest merge per step key,
+-- so without this column a reclaimed-then-retried step's earlier attempt
+-- result would be unrecoverable from workflow_attempt alone.
+alter table workflow.workflow_attempt add column result jsonb;
+
 create function workflow.finish_job(
   p_job_id       uuid,
   p_owner        text,
@@ -60,7 +67,7 @@ begin
   end if;
 
   update workflow.workflow_attempt
-     set state = 'SUCCEEDED', outcome = p_outcome, finished_at = now()
+     set state = 'SUCCEEDED', outcome = p_outcome, result = p_result, finished_at = now()
    where job_id = p_job_id and lease_version = p_lease_version and state = 'LEASED';
 
   update workflow.step_instance
