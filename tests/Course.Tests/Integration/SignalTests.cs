@@ -1,6 +1,12 @@
 using System.Text.Json.Nodes;
+using Course.Core.Actions;
+using Course.Core.Validation;
+using Course.Infrastructure.Postgres;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Workflow.Core.Canonicalization;
+using Workflow.Core.Security;
+using Workflow.Worker;
 
 namespace Course.Tests.Integration;
 
@@ -9,8 +15,10 @@ namespace Course.Tests.Integration;
 // undeclared signal type is rejected, a signal for an already-waiting process
 // applies and advances in the same transaction, an early signal is stored
 // ACCEPTED and picked up atomically the moment the process enters the
-// matching wait_signal step (never by a separate pass), and a signal to a
-// completed process is stored without moving it.
+// matching wait_signal step (never by a separate pass), a signal to a
+// completed process is stored without moving it, and the ticket's own opening
+// claim -- "автоматический шаг, ожидание сигнала, завершение" -- proven end
+// to end, not just between two wait_signal steps.
 [Collection("integration")]
 public sealed class SignalTests
 {
@@ -19,6 +27,28 @@ public sealed class SignalTests
     public SignalTests(ApiFactory factory)
     {
         this.factory = factory;
+    }
+
+    [Fact]
+    public async Task Signal_FullPath_AutomaticStepThenWaitSignalThenEnd_CompletesTheProcess()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateAutomaticThenWaitFlowAsync(flowName);
+        var processId = await StartProcessAsync(flowName);
+
+        var workerResult = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.Succeeded, workerResult.Outcome);
+
+        var afterAutomatic = await GetProcessAsync(processId);
+        Assert.Equal("WAITING_SIGNAL", afterAutomatic.State);
+        Assert.Equal("wait", afterAutomatic.CurrentStepKey);
+
+        var signalResult = await SignalAsync(processId, "test.signal", NewMessageId(), new JsonObject());
+        Assert.Equal("ok", signalResult["status"]!.GetValue<string>());
+
+        var final = await GetProcessAsync(processId);
+        Assert.Equal("COMPLETED", final.State);
+        Assert.Equal("end", final.CurrentStepKey);
     }
 
     [Fact]
@@ -244,6 +274,72 @@ public sealed class SignalTests
     private static string NewBusinessKey() => $"business-{Guid.NewGuid():N}";
 
     private static string NewMessageId() => $"message-{Guid.NewGuid():N}";
+
+    private static string NewOwner() => $"owner-{Guid.NewGuid():N}";
+
+    // Mirrors WorkerLoopTests.CreateLoop: reuses the app host's own
+    // ISchemaValidator/IActionExecutor singletons so a second JsonSchemaValidator
+    // never tries to re-register a catalog schema WorkflowProbeActionTests'
+    // HTTP call already compiled (see that class's own comment).
+    private WorkerLoop CreateLoop(string owner)
+    {
+        var dataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
+        var validator = factory.Services.GetRequiredService<ISchemaValidator>();
+        var actionExecutor = (PostgresActionExecutor)factory.Services.GetRequiredService<IActionExecutor>();
+
+        return new WorkerLoop(
+            owner, dataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
+            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes);
+    }
+
+    // The ticket's own opening claim, proven for real: an AUTOMATIC step
+    // (workflow.probe, ticket 05) that the worker loop (ticket 08) advances on
+    // its own, landing on a WAIT_SIGNAL step this ticket then completes.
+    private async Task PublishAndActivateAutomaticThenWaitFlowAsync(string flowName)
+    {
+        var document = JsonNode.Parse($$"""
+            {
+              "flow_name": "{{flowName}}",
+              "version": 1,
+              "start_step": "probe",
+              "steps": [
+                {
+                  "key": "probe",
+                  "type": "automatic",
+                  "task": {
+                    "module": "workflow",
+                    "action": "probe",
+                    "action_version": 1,
+                    "required_policy": ["workflow:execute"],
+                    "timeout_ms": 5000,
+                    "retry": {"max_attempts": 1, "delays_ms": []},
+                    "input_mapping": {},
+                    "input_constants": {"mode": "SUCCESS", "value": "signal-full-path"}
+                  }
+                },
+                {"key": "wait", "type": "wait_signal", "signal_type": "test.signal", "outcome": "SIGNALED"},
+                {"key": "end", "type": "end", "outcome": "DONE"}
+              ],
+              "transitions": [
+                {"from": "probe", "outcome": "SUCCEEDED", "to": "wait"},
+                {"from": "wait", "outcome": "SIGNALED", "to": "end"}
+              ]
+            }
+            """)!;
+
+        var published = await factory.Postgres.FlowPublisher.PublishAsync(
+            document, JsonCanonicalizer.Sha256Hex(document), CancellationToken.None);
+        if (published["status"]!.GetValue<string>() != "ok")
+        {
+            throw new InvalidOperationException($"failed to publish automatic-then-wait flow {flowName}: {published.ToJsonString()}");
+        }
+
+        var activated = await factory.Postgres.FlowPublisher.ActivateAsync(flowName, 1, CancellationToken.None);
+        if (activated["status"]!.GetValue<string>() != "ok")
+        {
+            throw new InvalidOperationException($"failed to activate automatic-then-wait flow {flowName}: {activated.ToJsonString()}");
+        }
+    }
 
     // start_step is itself a wait_signal step, and process_data plays no part
     // in signal resolution, so this map needs no automatic step or worker at
