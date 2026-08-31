@@ -67,7 +67,26 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         static ActionPipelineOutcome Rejected(ActionError error, int? actionVersion = null) =>
             new(ActionExecutionResult.Failure(error, actionVersion), TargetReturnedError: false);
 
-        var manifest = await ReadManifestAsync(connection, transaction, moduleName, actionName, explicitVersion, cancellationToken);
+        // A worker call already carries the pinned action version's manifest
+        // fields (claim_jobs's own jsonb_build_object -- migration 022), so it
+        // skips this pipeline's own api.get_action_manifest read entirely
+        // (ticket 10: workflow_worker's EXECUTE list stays exactly four
+        // functions, and this read would be a fifth). IdempotencyMode is a
+        // placeholder that can never trip IdempotencyRequired below: every
+        // worker call supplies a request id (TrustedContext.ExecutionId).
+        // TimeoutMs is likewise never read back out -- a caller that supplies
+        // Manifest always supplies TimeoutOverride too (WorkerLoop's own
+        // contract), which outranks it unconditionally a few lines down.
+        var manifest = callerContext?.Manifest is { } prefetched
+            ? new RuntimeManifest(
+                Version: explicitVersion!.Value,
+                IdempotencyMode: "not_required",
+                RequiredPolicy: prefetched.RequiredPolicy,
+                RequestSchema: prefetched.RequestSchema,
+                ResponseSchema: prefetched.ResponseSchema,
+                Outcomes: prefetched.Outcomes,
+                TimeoutMs: 0)
+            : await ReadManifestAsync(connection, transaction, moduleName, actionName, explicitVersion, cancellationToken);
         if (manifest is null)
         {
             return Rejected(ActionError.ActionNotFound());

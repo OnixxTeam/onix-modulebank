@@ -113,5 +113,9 @@ public sealed class FlowTestFinishCommandTests
         public Task<JsonNode> FinishAsync(
             Guid jobId, string owner, int leaseVersion, string outcome, JsonNode result, CancellationToken cancellationToken) =>
             Task.FromResult(onFinish((jobId, owner, leaseVersion, outcome, result)));
+
+        public Task<JsonNode> FailAsync(
+            Guid jobId, string owner, int leaseVersion, string errorCode, bool retryable, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("flow test-finish never fails a job");
     }
 }

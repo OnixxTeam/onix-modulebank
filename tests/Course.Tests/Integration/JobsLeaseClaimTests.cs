@@ -8,13 +8,14 @@ using Workflow.Core.Canonicalization;
 namespace Course.Tests.Integration;
 
 // Ticket 06 acceptance: entering an AUTOMATIC step opens a job in READY state
-// with its own execution id and a JobScheduled event; claim_job hands out one
-// job per call, picks up ready/due-deferred/expired-leased rows and nothing
-// else, never gives the same row to two concurrent callers, and a reclaim
-// after lease expiry keeps the job id and execution id while opening a new
-// attempt and marking the old one stale. No worker program exists yet -- every
-// scenario here drives workflow.claim_job directly, exactly as the ticket
-// describes.
+// with its own execution id and a JobScheduled event; claim_jobs (renamed from
+// claim_job by ticket 10 to match the role's own declared boundary name) hands
+// out one job per call, picks up ready/due-retry/expired-leased rows and
+// nothing else, never gives the same row to two concurrent callers, and a
+// reclaim after lease expiry keeps the job id and execution id while opening a
+// new attempt and marking the old one stale. No worker program exists yet --
+// every scenario here drives workflow.claim_jobs directly, exactly as the
+// ticket describes.
 [Collection("integration")]
 public sealed class JobsLeaseClaimTests
 {
@@ -191,7 +192,7 @@ public sealed class JobsLeaseClaimTests
         await factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
             await using var command = new NpgsqlCommand(
-                "update workflow.workflow_job set state = 'DEFERRED', next_attempt_at = now() - interval '1 second'",
+                "update workflow.workflow_job set state = 'RETRY_WAIT', next_attempt_at = now() - interval '1 second'",
                 connection);
             return await command.ExecuteNonQueryAsync();
         });
@@ -207,7 +208,7 @@ public sealed class JobsLeaseClaimTests
         await using var connection = new NpgsqlConnection(factory.Postgres.WorkerConnectionString);
         await connection.OpenAsync();
 
-        await using var claim = new NpgsqlCommand("select workflow.claim_job('direct-connection-owner', 2000)", connection);
+        await using var claim = new NpgsqlCommand("select workflow.claim_jobs('direct-connection-owner', 2000)", connection);
         var raw = (string)(await claim.ExecuteScalarAsync())!;
         Assert.Contains("\"status\"", raw);
 
@@ -219,6 +220,13 @@ public sealed class JobsLeaseClaimTests
     [Fact]
     public async Task AutocheckJobsAndAttemptsViews_ExposeTheDeclaredColumns_ThroughCourseRuntime()
     {
+        // Ticket 10 added retry: a job elsewhere in the shared table can now
+        // carry more than one attempt row (a reclaim, a retry), so an
+        // un-drained claim risks handing back an older job whose own
+        // multi-row, unordered `where job_id = @jobId` read below would be
+        // nondeterministic. Draining first guarantees the claim below is this
+        // test's own fresh job, with exactly one attempt row.
+        await DrainClaimableJobsAsync();
         var flowName = NewFlowName();
         await PublishAndActivateProbeFlowAsync(flowName);
         await StartProcessAsync(flowName);
