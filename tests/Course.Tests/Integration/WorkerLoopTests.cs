@@ -48,7 +48,7 @@ public sealed class WorkerLoopTests
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
-        Assert.Equal("DONE", jobState);
+        Assert.Equal("SUCCEEDED", jobState);
 
         var dispatch = await factory.Postgres.QueryAsRuntimeAsync(async connection =>
         {
@@ -113,8 +113,12 @@ public sealed class WorkerLoopTests
         Assert.Equal(WorkerStepOutcome.NoJob, result.Outcome);
     }
 
+    // Ticket 10: mapping_missing is non-retryable, and every fixture task in
+    // this file declares max_attempts = 1 -- so the one failed attempt this
+    // produces already exhausts the budget and the job goes straight to DEAD,
+    // never back to LEASED for a later retry.
     [Fact]
-    public async Task RunOnce_MappingSourceMissing_DoesNotCallTheAction_AndLeavesTheJobLeased()
+    public async Task RunOnce_MappingSourceMissing_DoesNotCallTheAction_AndFailsTheJobImmediately()
     {
         var flowName = NewFlowName();
         await PublishAndActivateMissingMappingFlowAsync(flowName);
@@ -127,14 +131,35 @@ public sealed class WorkerLoopTests
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
-        Assert.Equal("LEASED", jobState);
+        Assert.Equal("DEAD", jobState);
+
+        var attempt = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(
+                "select a.state, a.error_code from workflow.workflow_attempt a "
+                + "join workflow.workflow_job j on j.job_id = a.job_id where j.process_id = @processId", connection);
+            command.Parameters.AddWithValue("processId", processId);
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            return (State: reader.GetString(0), ErrorCode: reader.GetString(1));
+        });
+        Assert.Equal("FAILED", attempt.State);
+        Assert.Equal(WorkflowErrorCodes.MappingMissing, attempt.ErrorCode);
+
+        var processState = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select state from workflow.process_instance where process_id = @processId", ("processId", processId));
+        Assert.Equal("FAILED", processState);
 
         var dispatchCount = await CountDispatchesForProcessAsync(processId);
         Assert.Equal(0, dispatchCount);
     }
 
+    // UNDECLARED_OUTCOME is a pipeline-level contract violation (the target's
+    // outcome is not one of the manifest's declared outcomes), non-retryable
+    // the same way -- this fixture's task also has max_attempts = 1, so this
+    // single attempt exhausts the budget immediately.
     [Fact]
-    public async Task RunOnce_ContractViolation_RollsBackTheWholeTransaction_NoDispatchRow_JobStaysLeased()
+    public async Task RunOnce_ContractViolation_RollsBackTheWholeTransaction_NoDispatchRow_JobFailsImmediately()
     {
         var flowName = NewFlowName();
         await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "UNDECLARED_OUTCOME", value: "hello-world");
@@ -143,10 +168,11 @@ public sealed class WorkerLoopTests
         var result = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
 
         Assert.Equal(WorkerStepOutcome.ActionRejected, result.Outcome);
+        Assert.Equal("action.contract_violation", result.ErrorCode);
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
-        Assert.Equal("LEASED", jobState);
+        Assert.Equal("DEAD", jobState);
 
         var dispatchCount = await CountDispatchesForProcessAsync(processId);
         Assert.Equal(0, dispatchCount);

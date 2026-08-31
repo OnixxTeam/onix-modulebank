@@ -15,7 +15,7 @@ namespace Course.Tests.Integration;
 // declared transition, are rejected with the declared code and leave every
 // row untouched. flow test-finish (IWorkflowJobRuntime.FinishAsync over the
 // workflow_worker connection) is the same production boundary, exercised
-// here exactly as JobsLeaseClaimTests exercises claim_job.
+// here exactly as JobsLeaseClaimTests exercises claim_jobs.
 [Collection("integration")]
 public sealed class FinishJobGraphTestFinishTests
 {
@@ -71,7 +71,7 @@ public sealed class FinishJobGraphTestFinishTests
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where job_id = @jobId", ("jobId", jobId));
-        Assert.Equal("DONE", jobState);
+        Assert.Equal("SUCCEEDED", jobState);
 
         var eventTypes = await factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
@@ -278,7 +278,7 @@ public sealed class FinishJobGraphTestFinishTests
         await using var connection = new NpgsqlConnection(factory.Postgres.WorkerConnectionString);
         await connection.OpenAsync();
 
-        await using var claim = new NpgsqlCommand("select workflow.claim_job(@owner, 5000)", connection);
+        await using var claim = new NpgsqlCommand("select workflow.claim_jobs(@owner, 5000)", connection);
         claim.Parameters.AddWithValue("owner", NewOwner());
         var claimedRaw = (string)(await claim.ExecuteScalarAsync())!;
         var claimed = JsonNode.Parse(claimedRaw)!;

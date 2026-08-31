@@ -9,7 +9,7 @@ public sealed class PostgresWorkflowJobRuntime(string connectionString) : IWorkf
 {
     public Task<JsonNode> ClaimAsync(string owner, int leaseMs, CancellationToken cancellationToken) =>
         ExecuteScalarJsonAsync(
-            "select workflow.claim_job(@owner, @leaseMs)",
+            "select workflow.claim_jobs(@owner, @leaseMs)",
             command =>
             {
                 command.Parameters.AddWithValue("owner", owner);
@@ -28,6 +28,20 @@ public sealed class PostgresWorkflowJobRuntime(string connectionString) : IWorkf
                 command.Parameters.AddWithValue("leaseVersion", leaseVersion);
                 command.Parameters.AddWithValue("outcome", outcome);
                 command.Parameters.Add(new NpgsqlParameter("result", NpgsqlDbType.Jsonb) { Value = result.ToJsonString() });
+            },
+            cancellationToken);
+
+    public Task<JsonNode> FailAsync(
+        Guid jobId, string owner, int leaseVersion, string errorCode, bool retryable, CancellationToken cancellationToken) =>
+        ExecuteScalarJsonAsync(
+            "select workflow.fail_job(@jobId, @owner, @leaseVersion, @errorCode, @retryable)",
+            command =>
+            {
+                command.Parameters.AddWithValue("jobId", jobId);
+                command.Parameters.AddWithValue("owner", owner);
+                command.Parameters.AddWithValue("leaseVersion", leaseVersion);
+                command.Parameters.AddWithValue("errorCode", errorCode);
+                command.Parameters.AddWithValue("retryable", retryable);
             },
             cancellationToken);
 
