@@ -79,6 +79,18 @@ try
                 new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 CancellationToken.None);
             break;
+        case "flow start":
+            envelope = await FlowStartCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow get":
+            envelope = await FlowGetCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
             Console.Out.Write(CliEnvelope.Fail("command.unknown", $"unknown command: {parsed.Name}").ToJson());
