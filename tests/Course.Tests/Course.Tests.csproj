@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\src\Course.Core\Course.Core.csproj" />
     <ProjectReference Include="..\..\src\Course.Infrastructure\Course.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Workflow.Core\Workflow.Core.csproj" />
+    <ProjectReference Include="..\..\src\Workflow.Worker\Workflow.Worker.csproj" />
   </ItemGroup>
 
 </Project>

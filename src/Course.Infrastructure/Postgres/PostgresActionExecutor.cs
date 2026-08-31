@@ -237,7 +237,12 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             {
                 // Client-side backstop alongside statement_timeout (server) and
                 // context.Deadline (informational): three expressions of one timeout_ms.
-                command.CommandTimeout = (int)Math.Ceiling(timeoutMs / 1000.0);
+                // The +2s margin (ticket 08's own "клиентский предел с запасом")
+                // keeps the client strictly behind the server: without it the two
+                // round to the same second and a slow network hop could trip the
+                // client first, which would cancel the command asynchronously while
+                // the server-side transaction is still deciding on its own.
+                command.CommandTimeout = (int)Math.Ceiling(timeoutMs / 1000.0) + 2;
                 command.Parameters.AddWithValue("module", moduleName);
                 command.Parameters.AddWithValue("action", actionName);
                 command.Parameters.AddWithValue("version", version);

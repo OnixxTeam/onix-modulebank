@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace Workflow.Core.Validation;
 
 // RFC 6901 pointer parsing, kept separate from the schema's `^/` pattern check:
@@ -53,6 +55,35 @@ public static class JsonPointer
             }
         }
 
+        return true;
+    }
+
+    // Walks segments through nested objects and arrays to read a mapping source out
+    // of process data. A property present with an explicit JSON null is a resolved
+    // value (returns true, value null), never confused with an absent property --
+    // only a missing key or an out-of-range/non-numeric array segment counts as
+    // unresolved, which is exactly the distinction workflow.mapping_missing needs.
+    public static bool TryResolve(JsonNode? root, IReadOnlyList<string> segments, out JsonNode? value)
+    {
+        JsonNode? current = root;
+
+        foreach (var segment in segments)
+        {
+            switch (current)
+            {
+                case JsonObject obj when obj.TryGetPropertyValue(segment, out var next):
+                    current = next;
+                    break;
+                case JsonArray array when int.TryParse(segment, out var index) && index >= 0 && index < array.Count:
+                    current = array[index];
+                    break;
+                default:
+                    value = null;
+                    return false;
+            }
+        }
+
+        value = current;
         return true;
     }
 
