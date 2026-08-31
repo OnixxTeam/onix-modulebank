@@ -37,30 +37,48 @@ public enum WorkerStepOutcome
     FinishRejected,
 }
 
-// The whole automatic-step boundary as one instantiable class: claim (its own
-// short, separately-committed transaction -- SPEC "Lease, attempts и fencing"),
-// map, validate, invoke through the shared executor's foreign-transaction path,
-// finish -- with external clock and interval profile injected so a test can run
-// two instances against one database without a container per instance or a real
-// poll delay. Carries no map, step or action name of its own: every branch below
-// reads from the claimed job's own JSON, never from a literal drawn from a
-// specific flow.
+// ErrorCode is set only for MappingMissing today, carrying the one declared
+// code SPEC fixes by name (Workflow.Core.Runtime.WorkflowErrorCodes) -- ticket
+// 10's fail_job wiring reads it from here rather than re-deriving it from the
+// outcome enum.
+public sealed record WorkerStepResult(WorkerStepOutcome Outcome, string? ErrorCode = null)
+{
+    public static readonly WorkerStepResult NoJob = new(WorkerStepOutcome.NoJob);
+    public static readonly WorkerStepResult RequestInvalid = new(WorkerStepOutcome.RequestInvalid);
+    public static readonly WorkerStepResult ActionRejected = new(WorkerStepOutcome.ActionRejected);
+    public static readonly WorkerStepResult FinishRejected = new(WorkerStepOutcome.FinishRejected);
+    public static readonly WorkerStepResult Succeeded = new(WorkerStepOutcome.Succeeded);
+    public static readonly WorkerStepResult MappingMissing = new(WorkerStepOutcome.MappingMissing, WorkflowErrorCodes.MappingMissing);
+}
+
+// The whole automatic-step boundary as one instantiable class: claim (via the
+// existing IWorkflowJobRuntime -- its own short, separately-committed
+// transaction, SPEC "Lease, attempts и fencing"), map, validate, invoke through
+// the shared executor's foreign-transaction path, finish -- with external clock
+// and interval profile injected so a test can run two instances against one
+// database without a container per instance or a real poll delay. Finish runs
+// as its own raw call rather than through IWorkflowJobRuntime.FinishAsync
+// because it must share the connection and transaction the invoke just ran in,
+// which that interface's own (separately-connecting) method cannot do. Carries
+// no map, step or action name of its own: every branch below reads from the
+// claimed job's own JSON, never from a literal drawn from a specific flow.
 public sealed class WorkerLoop(
     string owner,
     NpgsqlDataSource dataSource,
+    IWorkflowJobRuntime jobRuntime,
     PostgresActionExecutor actionExecutor,
     ISchemaValidator validator,
     TimeProvider clock,
     IntervalProfile intervals,
     IReadOnlyList<string> scopes)
 {
-    public async Task<WorkerStepOutcome> RunOnceAsync(CancellationToken cancellationToken)
+    public async Task<WorkerStepResult> RunOnceAsync(CancellationToken cancellationToken)
     {
-        var claimed = await ClaimAsync(cancellationToken);
+        var claimed = await jobRuntime.ClaimAsync(owner, intervals.LeaseMs, cancellationToken);
         var job = claimed["job"];
         if (job is null || job.GetValueKind() == JsonValueKind.Null)
         {
-            return WorkerStepOutcome.NoJob;
+            return WorkerStepResult.NoJob;
         }
 
         return await ProcessJobAsync(job, cancellationToken);
@@ -70,15 +88,15 @@ public sealed class WorkerLoop(
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var outcome = await RunOnceAsync(cancellationToken);
-            if (outcome == WorkerStepOutcome.NoJob)
+            var result = await RunOnceAsync(cancellationToken);
+            if (result.Outcome == WorkerStepOutcome.NoJob)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(intervals.PollIntervalMs), clock, cancellationToken);
             }
         }
     }
 
-    private async Task<WorkerStepOutcome> ProcessJobAsync(JsonNode job, CancellationToken cancellationToken)
+    private async Task<WorkerStepResult> ProcessJobAsync(JsonNode job, CancellationToken cancellationToken)
     {
         var task = job["task"]!;
         var processData = job["process"]!["data"];
@@ -90,13 +108,13 @@ public sealed class WorkerLoop(
         var mapping = WorkflowStepPayloadMapper.BuildPayload(inputConstants, inputMapping, processData);
         if (!mapping.IsSuccess)
         {
-            return WorkerStepOutcome.MappingMissing;
+            return WorkerStepResult.MappingMissing;
         }
 
         var requestSchema = task["requestSchema"]!;
         if (!validator.Validate(requestSchema, mapping.Payload!).IsValid)
         {
-            return WorkerStepOutcome.RequestInvalid;
+            return WorkerStepResult.RequestInvalid;
         }
 
         var jobId = Guid.Parse(job["jobId"]!.GetValue<string>());
@@ -106,7 +124,7 @@ public sealed class WorkerLoop(
         var processId = Guid.Parse(job["process"]!["processId"]!.GetValue<string>());
         var timeoutMs = task["timeoutMs"]!.GetValue<int>();
 
-        var claims = new VerifiedClaims(WorkflowWorkerPrincipal.Name, "workflow-worker", scopes);
+        var claims = new VerifiedClaims(WorkflowWorkerPrincipal.Name, WorkflowWorkerPrincipal.Name, scopes);
         var callerContext = new ActionCallerContext(
             ProcessId: processId,
             JobId: jobId,
@@ -136,7 +154,7 @@ public sealed class WorkerLoop(
         // stamped with an executionId it is about to reuse.
         if (!pipelineOutcome.Result.IsSuccess)
         {
-            return WorkerStepOutcome.ActionRejected;
+            return WorkerStepResult.ActionRejected;
         }
 
         var finish = await FinishAsync(
@@ -145,22 +163,11 @@ public sealed class WorkerLoop(
 
         if (finish["status"]!.GetValue<string>() != "ok")
         {
-            return WorkerStepOutcome.FinishRejected;
+            return WorkerStepResult.FinishRejected;
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return WorkerStepOutcome.Succeeded;
-    }
-
-    private async Task<JsonNode> ClaimAsync(CancellationToken cancellationToken)
-    {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand("select workflow.claim_job(@owner, @leaseMs)", connection);
-        command.Parameters.AddWithValue("owner", owner);
-        command.Parameters.AddWithValue("leaseMs", intervals.LeaseMs);
-
-        var raw = (string)(await command.ExecuteScalarAsync(cancellationToken))!;
-        return JsonNode.Parse(raw)!;
+        return WorkerStepResult.Succeeded;
     }
 
     private static async Task<JsonNode> FinishAsync(

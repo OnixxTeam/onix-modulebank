@@ -5,6 +5,7 @@ using Course.Infrastructure.Postgres;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Workflow.Core.Canonicalization;
+using Workflow.Core.Runtime;
 using Workflow.Core.Security;
 using Workflow.Worker;
 
@@ -37,9 +38,9 @@ public sealed class WorkerLoopTests
 
         var loop = CreateLoop(NewOwner());
 
-        var outcome = await loop.RunOnceAsync(CancellationToken.None);
+        var result = await loop.RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(WorkerStepOutcome.Succeeded, outcome);
+        Assert.Equal(WorkerStepOutcome.Succeeded, result.Outcome);
 
         var processState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.process_instance where process_id = @processId", ("processId", processId));
@@ -85,11 +86,11 @@ public sealed class WorkerLoopTests
         var processId = await StartProcessAsync(flowName);
         var loop = CreateLoop(NewOwner());
 
-        var seedOutcome = await loop.RunOnceAsync(CancellationToken.None);
-        Assert.Equal(WorkerStepOutcome.Succeeded, seedOutcome);
+        var seedResult = await loop.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.Succeeded, seedResult.Outcome);
 
-        var probeOutcome = await loop.RunOnceAsync(CancellationToken.None);
-        Assert.Equal(WorkerStepOutcome.Succeeded, probeOutcome);
+        var probeResult = await loop.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.Succeeded, probeResult.Outcome);
 
         var processData = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select process_data::text from workflow.process_instance where process_id = @processId", ("processId", processId));
@@ -107,9 +108,9 @@ public sealed class WorkerLoopTests
     {
         await DrainClaimableJobsAsync();
 
-        var outcome = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
+        var result = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(WorkerStepOutcome.NoJob, outcome);
+        Assert.Equal(WorkerStepOutcome.NoJob, result.Outcome);
     }
 
     [Fact]
@@ -119,9 +120,10 @@ public sealed class WorkerLoopTests
         await PublishAndActivateMissingMappingFlowAsync(flowName);
         var processId = await StartProcessAsync(flowName);
 
-        var outcome = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
+        var result = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(WorkerStepOutcome.MappingMissing, outcome);
+        Assert.Equal(WorkerStepOutcome.MappingMissing, result.Outcome);
+        Assert.Equal(WorkflowErrorCodes.MappingMissing, result.ErrorCode);
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
@@ -138,9 +140,9 @@ public sealed class WorkerLoopTests
         await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "UNDECLARED_OUTCOME", value: "hello-world");
         var processId = await StartProcessAsync(flowName);
 
-        var outcome = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
+        var result = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
 
-        Assert.Equal(WorkerStepOutcome.ActionRejected, outcome);
+        Assert.Equal(WorkerStepOutcome.ActionRejected, result.Outcome);
 
         var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
             "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
@@ -162,9 +164,10 @@ public sealed class WorkerLoopTests
         var second = CreateLoop(NewOwner());
 
         var results = await Task.WhenAll(first.RunOnceAsync(CancellationToken.None), second.RunOnceAsync(CancellationToken.None));
+        var outcomes = results.Select(result => result.Outcome).ToList();
 
-        Assert.Single(results, WorkerStepOutcome.Succeeded);
-        Assert.Single(results, WorkerStepOutcome.NoJob);
+        Assert.Single(outcomes, WorkerStepOutcome.Succeeded);
+        Assert.Single(outcomes, WorkerStepOutcome.NoJob);
 
         var effectCount = await factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
@@ -192,8 +195,8 @@ public sealed class WorkerLoopTests
         var actionExecutor = (PostgresActionExecutor)factory.Services.GetRequiredService<IActionExecutor>();
 
         return new WorkerLoop(
-            owner, dataSource, actionExecutor, validator, TimeProvider.System, new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100),
-            WorkflowWorkerPrincipal.DefaultScopes);
+            owner, dataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
+            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes);
     }
 
     // Scoped to this one process's job (via its execution id, the dispatch's own

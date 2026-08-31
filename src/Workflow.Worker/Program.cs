@@ -21,10 +21,12 @@ var schemaValidator = new JsonSchemaValidator();
 
 await using var dataSource = NpgsqlDataSource.Create(connectionString);
 var actionExecutor = new PostgresActionExecutor(dataSource, schemaValidator, TimeProvider.System);
+var jobRuntime = new PostgresWorkflowJobRuntime(connectionString);
 
 var loop = new WorkerLoop(
     owner,
     dataSource,
+    jobRuntime,
     actionExecutor,
     schemaValidator,
     TimeProvider.System,
