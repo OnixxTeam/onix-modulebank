@@ -20,6 +20,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     private const string MigratorPassword = "test-migrator-password";
     private const string PublisherPassword = "test-publisher-password";
     private const string RuntimePassword = "test-runtime-password";
+    private const string WorkerPassword = "test-worker-password";
     private const string SuperuserPassword = "test-superuser-password";
     private const string DatabaseName = "course";
 
@@ -30,6 +31,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("COURSE_MIGRATOR_PASSWORD", MigratorPassword)
         .WithEnvironment("COURSE_PUBLISHER_PASSWORD", PublisherPassword)
         .WithEnvironment("COURSE_RUNTIME_PASSWORD", RuntimePassword)
+        .WithEnvironment("WORKFLOW_WORKER_PASSWORD", WorkerPassword)
         .WithResourceMapping(
             new FileInfo(RepoPaths.Combine("db", "init", "00-roles.sh")),
             new FileInfo("/docker-entrypoint-initdb.d/00-roles.sh"))
@@ -39,11 +41,15 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public string PublisherConnectionString => BuildConnectionString("course_publisher", PublisherPassword);
 
+    public string WorkerConnectionString => BuildConnectionString("workflow_worker", WorkerPassword);
+
     public IActionPublisher Publisher { get; private set; } = null!;
 
     public IWorkflowFlowPublisher FlowPublisher { get; private set; } = null!;
 
     public IWorkflowProcessRuntime ProcessRuntime { get; private set; } = null!;
+
+    public IWorkflowJobRuntime JobRuntime { get; private set; } = null!;
 
     public async Task InitializeAsync()
     {
@@ -57,6 +63,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         Publisher = new PostgresActionPublisher(PublisherConnectionString);
         FlowPublisher = new PostgresWorkflowFlowPublisher(PublisherConnectionString);
         ProcessRuntime = new PostgresWorkflowProcessRuntime(PublisherConnectionString);
+        JobRuntime = new PostgresWorkflowJobRuntime(WorkerConnectionString);
 
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.request.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.get.v1.action.json"));
