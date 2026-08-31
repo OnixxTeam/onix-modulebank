@@ -1,0 +1,71 @@
+{
+  "contract_version": "course-1",
+  "module": "workflow",
+  "action": "probe",
+  "version": 1,
+  "http_method": "POST",
+  "target_schema": "workflow_probe",
+  "target_function": "probe_v1",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:workflow-probe-payload",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "mode",
+      "value"
+    ],
+    "properties": {
+      "mode": {
+        "enum": [
+          "SUCCESS",
+          "MANUAL",
+          "RETRYABLE_ERROR",
+          "PERMANENT_ERROR",
+          "UNDECLARED_OUTCOME",
+          "INVALID_RESULT"
+        ]
+      },
+      "value": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:workflow-probe-response",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "effectKey",
+      "value",
+      "stored"
+    ],
+    "properties": {
+      "effectKey": {
+        "type": "string",
+        "minLength": 1
+      },
+      "value": {
+        "type": "string"
+      },
+      "stored": {
+        "type": "boolean"
+      }
+    }
+  },
+  "outcomes": [
+    "SUCCEEDED",
+    "ROUTE_MANUAL"
+  ],
+  "required_policy": [
+    "workflow:execute"
+  ],
+  "idempotency_mode": "required",
+  "idempotency_scope": "principal_action",
+  "timeout_ms": 5000,
+  "enabled": true,
+  "is_default": true
+}
