@@ -26,6 +26,20 @@ public sealed class PostgresWorkflowProcessRuntime(string connectionString) : IW
             command => command.Parameters.AddWithValue("processId", processId),
             cancellationToken);
 
+    public Task<JsonNode> SignalAsync(
+        Guid processId, string messageId, string signalType, string bodyHash, JsonNode body, CancellationToken cancellationToken) =>
+        ExecuteScalarJsonAsync(
+            "select workflow.apply_signal(@processId, @messageId, @signalType, @bodyHash, @body)",
+            command =>
+            {
+                command.Parameters.AddWithValue("processId", processId);
+                command.Parameters.AddWithValue("messageId", messageId);
+                command.Parameters.AddWithValue("signalType", signalType);
+                command.Parameters.AddWithValue("bodyHash", bodyHash);
+                command.Parameters.Add(new NpgsqlParameter("body", NpgsqlDbType.Jsonb) { Value = body.ToJsonString() });
+            },
+            cancellationToken);
+
     private async Task<JsonNode> ExecuteScalarJsonAsync(
         string sql, Action<NpgsqlCommand> addParameters, CancellationToken cancellationToken)
     {

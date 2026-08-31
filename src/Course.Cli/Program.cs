@@ -91,6 +91,12 @@ try
                 new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 CancellationToken.None);
             break;
+        case "flow signal":
+            envelope = await FlowSignalCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
         case "flow test-finish":
             envelope = await FlowTestFinishCommand.ExecuteAsync(
                 parsed,
