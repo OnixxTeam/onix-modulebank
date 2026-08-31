@@ -5,6 +5,7 @@ using Course.Tests.Support;
 using Npgsql;
 using Testcontainers.PostgreSql;
 using Workflow.Core.Publishing;
+using Workflow.Core.Runtime;
 
 namespace Course.Tests.Integration;
 
@@ -42,6 +43,8 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public IWorkflowFlowPublisher FlowPublisher { get; private set; } = null!;
 
+    public IWorkflowProcessRuntime ProcessRuntime { get; private set; } = null!;
+
     public async Task InitializeAsync()
     {
         await container.StartAsync();
@@ -53,9 +56,11 @@ public sealed class PostgresFixture : IAsyncLifetime
 
         Publisher = new PostgresActionPublisher(PublisherConnectionString);
         FlowPublisher = new PostgresWorkflowFlowPublisher(PublisherConnectionString);
+        ProcessRuntime = new PostgresWorkflowProcessRuntime(PublisherConnectionString);
 
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.request.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.get.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "workflow.get.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
         await PublishAndActivateAsync(TestManifests.EchoContext());
