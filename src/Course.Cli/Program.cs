@@ -91,6 +91,13 @@ try
                 new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 CancellationToken.None);
             break;
+        case "flow test-finish":
+            envelope = await FlowTestFinishCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowJobRuntime(BuildConnectionString("workflow_worker", "WORKFLOW_WORKER_PASSWORD")),
+                Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1",
+                CancellationToken.None);
+            break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
             Console.Out.Write(CliEnvelope.Fail("command.unknown", $"unknown command: {parsed.Name}").ToJson());
