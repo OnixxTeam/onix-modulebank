@@ -2,13 +2,16 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 COPY Directory.Build.props ./
+COPY contracts/ contracts/
 COPY src/Course.Core/Course.Core.csproj src/Course.Core/
 COPY src/Course.Infrastructure/Course.Infrastructure.csproj src/Course.Infrastructure/
+COPY src/Workflow.Core/Workflow.Core.csproj src/Workflow.Core/
 COPY src/Course.Api/Course.Api.csproj src/Course.Api/
 RUN dotnet restore src/Course.Api/Course.Api.csproj
 
 COPY src/Course.Core/ src/Course.Core/
 COPY src/Course.Infrastructure/ src/Course.Infrastructure/
+COPY src/Workflow.Core/ src/Workflow.Core/
 COPY src/Course.Api/ src/Course.Api/
 RUN dotnet publish src/Course.Api/Course.Api.csproj -c Release -o /app/publish --no-restore
 
