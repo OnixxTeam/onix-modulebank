@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace Course.Tests.Integration;
 
@@ -124,4 +126,47 @@ public sealed class WorkflowProbeActionTests(ApiFactory factory)
             "select count(*) from workflow_probe.effect where effect_key = @key", ("key", key));
         Assert.Equal(1, rowCount);
     }
+
+    // The previous test can pass even with workflow_probe.effect's ON CONFLICT
+    // clause deleted entirely: api.invoke's own idempotency-keys claim matches
+    // on the identical payload and replays the stored envelope without
+    // probe_v1 running a second time at all. This test calls probe_v1
+    // directly -- bypassing api.invoke, its claim table and its replay path
+    // -- with two different payloads under the same effect key, so the
+    // primary key on workflow_probe.effect is the only thing that can be
+    // stopping the second insert.
+    [Fact]
+    public async Task Effect_IsIdempotentByItsOwnPrimaryKey_IndependentOfApiInvokesReplay()
+    {
+        var key = NewKey();
+
+        await CallProbeDirectlyAsync(key, "SUCCESS", "first-direct-call");
+        await CallProbeDirectlyAsync(key, "SUCCESS", "second-direct-call");
+
+        var rowCount = await factory.Postgres.ScalarAsOwnerAsync<long>(
+            "select count(*) from workflow_probe.effect where effect_key = @key", ("key", key));
+        Assert.Equal(1, rowCount);
+
+        var stored = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select business_value from workflow_probe.effect where effect_key = @key", ("key", key));
+        Assert.Equal("first-direct-call", stored);
+    }
+
+    private Task<int> CallProbeDirectlyAsync(string effectKey, string mode, string value) =>
+        factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(
+                "select workflow_probe.probe_v1(@context, @payload)", connection);
+            command.Parameters.Add(new NpgsqlParameter("context", NpgsqlDbType.Jsonb)
+            {
+                Value = new JsonObject { ["requestId"] = effectKey }.ToJsonString(),
+            });
+            command.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb)
+            {
+                Value = Payload(mode, value).ToJsonString(),
+            });
+
+            await command.ExecuteScalarAsync();
+            return 0;
+        });
 }

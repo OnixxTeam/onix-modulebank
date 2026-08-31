@@ -5,20 +5,23 @@
 -- outcome and a response-schema violation) can be driven without waiting on
 -- a hidden checker action.
 --
--- The domain effect key is p_context->>'requestId', not executionId. Every
--- caller -- a network Idempotency-Key header today, the workflow worker once
--- ticket 08 lands (its idempotency key equals the job's executionId, by that
--- ticket's own contract) -- always sets requestId, so this is the one field
--- both paths share; reading executionId instead would leave every direct
--- network reproduction of a mode (this ticket's own acceptance test) with no
--- key at all. The manifest's idempotency_mode=required guarantees it is
--- never null here.
+-- The domain effect key prefers p_context->>'executionId' -- TrustedContext.cs's
+-- own documented rule ("ExecutionId is the subject-effect idempotency key --
+-- target functions read it under this name") -- and falls back to requestId.
+-- executionId is null on every direct network call (PostgresActionExecutor
+-- only serialises it for the workflow worker), so reading it exclusively
+-- would leave this ticket's own network reproduction of every mode with no
+-- key at all; requestId is always set instead, by the manifest's
+-- idempotency_mode=required. Once ticket 08's worker lands, its idempotency
+-- key equals the job's executionId by that ticket's own contract, so both
+-- fields agree on every workflow-invoked call and the fallback never fires
+-- there.
 create schema workflow_probe;
 
 create table workflow_probe.effect (
   effect_key     text        primary key,
   business_value text        not null,
-  created_at     timestamptz not null default pg_catalog.clock_timestamp()
+  created_at     timestamptz not null default pg_catalog.now()
 );
 
 -- Mirrors payment.request_v1's shape: SECURITY DEFINER, search_path pinned to
@@ -33,7 +36,7 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_effect_key text := p_context ->> 'requestId';
+  v_effect_key text := coalesce(p_context ->> 'executionId', p_context ->> 'requestId');
   v_mode       text := p_payload ->> 'mode';
   v_value      text := p_payload ->> 'value';
   v_outcome    text;
