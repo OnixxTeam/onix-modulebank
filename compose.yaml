@@ -4,7 +4,12 @@ x-course-db-env: &course-db-env
   COURSE_DB_NAME: course
   COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
   COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
+  WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
   WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read}
+  # Production default (unset -> long lease, slow poll). The checker's own
+  # override always pins this to "1" for api/cli/worker-a/worker-b regardless
+  # of what is set here (autocheck/public_check.py `_environment`).
+  COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
 
 services:
   postgres:
@@ -30,6 +35,10 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    # idle_in_transaction_session_timeout stays at the image's own default (0,
+    # disabled): a worker parked on a failpoint holds an idle-in-transaction
+    # connection on purpose (SPEC "Failpoints" #16) and must not be dropped
+    # before the checker reads its ack.
 
   bootstrap:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
@@ -56,6 +65,27 @@ services:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
     environment: *course-db-env
     depends_on: {postgres: {condition: service_healthy}}
+
+  # worker-a builds workflow-worker:local; worker-b below only references that
+  # same tag with no build of its own -- Compose builds it once and both
+  # services run the identical image, differing only in WORKFLOW_WORKER_OWNER
+  # (SPEC "тот же image, lease owner worker-a/worker-b").
+  worker-a:
+    build: {context: ., dockerfile: src/Workflow.Worker/Dockerfile}
+    image: workflow-worker:local
+    environment:
+      <<: *course-db-env
+      WORKFLOW_WORKER_OWNER: worker-a
+      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
+    depends_on: {api: {condition: service_started}}
+
+  worker-b:
+    image: workflow-worker:local
+    environment:
+      <<: *course-db-env
+      WORKFLOW_WORKER_OWNER: worker-b
+      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
+    depends_on: {api: {condition: service_started}}
 
 volumes:
   pgdata:

@@ -81,8 +81,11 @@ public sealed class WorkerLoop(
     ISchemaValidator validator,
     TimeProvider clock,
     IntervalProfile intervals,
-    IReadOnlyList<string> scopes)
+    IReadOnlyList<string> scopes,
+    IFailpointGate? failpoints = null)
 {
+    private readonly IFailpointGate failpointGate = failpoints ?? NoopFailpointGate.Instance;
+
     public async Task<WorkerStepResult> RunOnceAsync(CancellationToken cancellationToken)
     {
         var claimed = await jobRuntime.ClaimAsync(owner, intervals.LeaseMs, cancellationToken);
@@ -109,6 +112,13 @@ public sealed class WorkerLoop(
 
     private async Task<WorkerStepResult> ProcessJobAsync(JsonNode job, CancellationToken cancellationToken)
     {
+        // SPEC failpoint "after_job_claim": commit of lease and attempt has
+        // already happened inside ClaimAsync -- this is the earliest point
+        // after that commit and strictly before api.invoke, so it fires on a
+        // successful claim only, never on an empty-poll iteration (RunOnceAsync
+        // returns WorkerStepResult.NoJob before ever calling this method).
+        await failpointGate.ReachAsync("after_job_claim", owner, cancellationToken);
+
         var task = job["task"]!;
         var processData = job["process"]!["data"];
 
@@ -202,6 +212,12 @@ public sealed class WorkerLoop(
             await RollbackAndFailAsync(transaction, jobId, leaseVersion, actionError.Code, actionError.Retryable, cancellationToken);
             return new WorkerStepResult(WorkerStepOutcome.ActionRejected, actionError.Code);
         }
+
+        // SPEC failpoint "after_action_before_finish": the effect and the
+        // response-schema check both already happened inside
+        // ExecuteInTransactionAsync above, and the transaction is still open --
+        // this call must not commit or roll it back either way.
+        await failpointGate.ReachAsync("after_action_before_finish", owner, cancellationToken);
 
         var finish = await FinishAsync(
             connection, transaction, jobId, owner, leaseVersion, pipelineOutcome!.Result.Outcome!, pipelineOutcome.Result.Result!,

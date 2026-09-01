@@ -194,15 +194,92 @@ public sealed class WorkerLoopTests
 
         Assert.Single(outcomes, WorkerStepOutcome.Succeeded);
         Assert.Single(outcomes, WorkerStepOutcome.NoJob);
+        Assert.Equal(1, await EffectCountAsync(value));
+    }
 
-        var effectCount = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+    // Ticket 11 acceptance: the after_job_claim boundary fires strictly after
+    // the claim (lease + attempt already committed by ClaimAsync) and before
+    // the target is ever invoked -- so cancelling the block here must leave
+    // zero dispatches/effects and the lease still held by this owner, exactly
+    // what a real SIGKILL at this boundary leaves for a second worker to
+    // reclaim once the (test-profile) lease expires.
+    [Fact]
+    public async Task RunOnce_FailpointAfterJobClaim_BlocksBeforeInvokingTheAction_WithZeroDispatchesOnCancel()
+    {
+        var flowName = NewFlowName();
+        var value = $"failpoint-claim-{Guid.NewGuid():N}";
+        await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "SUCCESS", value: value);
+        var processId = await StartProcessAsync(flowName);
+
+        var owner = NewOwner();
+        var output = new StringWriter();
+        var loop = CreateLoop(owner, new FailpointGate("after_job_claim", output));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
+
+        AssertSingleAck(output.ToString(), "after_job_claim", owner);
+
+        var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
+        Assert.Equal("LEASED", jobState);
+
+        Assert.Equal(0, await CountDispatchesForProcessAsync(processId));
+        Assert.Equal(0, await EffectCountAsync(value));
+    }
+
+    // Ticket 11 acceptance: the after_action_before_finish boundary fires
+    // after the effect and response validation already happened inside the
+    // still-open action transaction, strictly before finish_job/commit.
+    // Cancelling here unwinds the `await using` transaction/connection
+    // (an explicit rollback, standing in for the server-side rollback a real
+    // SIGKILL triggers) -- the effect and dispatch this attempt produced must
+    // not survive it.
+    [Fact]
+    public async Task RunOnce_FailpointAfterActionBeforeFinish_BlocksWithOpenTransaction_RollsBackOnCancel_NoEffectSurvives()
+    {
+        var flowName = NewFlowName();
+        var value = $"failpoint-finish-{Guid.NewGuid():N}";
+        await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "SUCCESS", value: value);
+        var processId = await StartProcessAsync(flowName);
+
+        var owner = NewOwner();
+        var output = new StringWriter();
+        var loop = CreateLoop(owner, new FailpointGate("after_action_before_finish", output));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
+
+        AssertSingleAck(output.ToString(), "after_action_before_finish", owner);
+
+        Assert.Equal(0, await EffectCountAsync(value));
+        Assert.Equal(0, await CountDispatchesForProcessAsync(processId));
+    }
+
+    // Scoped by business_value the way CountDispatchesForProcessAsync is
+    // scoped by process id -- the effect table, like action_dispatches, is
+    // shared across every test in this class.
+    private Task<long> EffectCountAsync(string value) =>
+        factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
             await using var command = new NpgsqlCommand(
                 "select count(*) from workflow_probe.effect where business_value = @value", connection);
             command.Parameters.AddWithValue("value", value);
             return (long)(await command.ExecuteScalarAsync())!;
         });
-        Assert.Equal(1, effectCount);
+
+    // Exactly one structured line, matching SPEC's own shape
+    // {"event":"failpoint.reached","name":"...","instanceId":"..."} -- a
+    // second line (fired on a poll iteration rather than a successful claim)
+    // is the exact regression `parse_failpoint_acks` would flag.
+    private static void AssertSingleAck(string output, string expectedName, string expectedInstanceId)
+    {
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var line = Assert.Single(lines);
+        var ack = JsonNode.Parse(line)!;
+        Assert.Equal("failpoint.reached", ack["event"]!.GetValue<string>());
+        Assert.Equal(expectedName, ack["name"]!.GetValue<string>());
+        Assert.Equal(expectedInstanceId, ack["instanceId"]!.GetValue<string>());
     }
 
     // Reuses the app host's own ISchemaValidator/IActionExecutor singletons
@@ -214,7 +291,9 @@ public sealed class WorkerLoopTests
     // executor's own NpgsqlDataSource -- connection and transaction are always
     // the caller's -- so reusing the course_runtime-backed singleton here is
     // safe even though this loop talks to Postgres as workflow_worker.
-    private WorkerLoop CreateLoop(string owner)
+    private WorkerLoop CreateLoop(string owner) => CreateLoop(owner, failpoints: null);
+
+    private WorkerLoop CreateLoop(string owner, IFailpointGate? failpoints)
     {
         var dataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
         var validator = factory.Services.GetRequiredService<ISchemaValidator>();
@@ -222,7 +301,7 @@ public sealed class WorkerLoopTests
 
         return new WorkerLoop(
             owner, dataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
-            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes);
+            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes, failpoints);
     }
 
     // Scoped to this one process's job (via its execution id, the dispatch's own
