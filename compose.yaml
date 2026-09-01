@@ -13,7 +13,7 @@ x-course-db-env: &course-db-env
 
 services:
   postgres:
-    image: postgres:17-alpine
+    build: {context: ./db}
     environment:
       POSTGRES_DB: course
       POSTGRES_USER: postgres
@@ -24,7 +24,6 @@ services:
       WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # -h 127.0.0.1 forces the TCP check dependents actually need. Without it
       # pg_isready uses the unix socket, which the temporary server the entrypoint
