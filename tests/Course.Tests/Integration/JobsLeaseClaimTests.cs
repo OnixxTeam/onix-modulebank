@@ -236,8 +236,8 @@ public sealed class JobsLeaseClaimTests
         var jobRow = await factory.Postgres.QueryAsRuntimeAsync(async connection =>
         {
             await using var command = new NpgsqlCommand(
-                "select job_id, process_id, step_instance_id, execution_id, state, owner, "
-                + "lease_version, lease_expires_at, attempt_count, next_attempt_at, created_at, updated_at "
+                "select job_id, process_id, step_instance_id, execution_id, state, lease_owner, "
+                + "lease_version, lease_until, attempt_count, next_attempt_at, created_at, updated_at "
                 + "from autocheck.jobs where job_id = @jobId", connection);
             command.Parameters.AddWithValue("jobId", jobId);
             await using var reader = await command.ExecuteReaderAsync();
@@ -249,14 +249,14 @@ public sealed class JobsLeaseClaimTests
         var attemptRow = await factory.Postgres.QueryAsRuntimeAsync(async connection =>
         {
             await using var command = new NpgsqlCommand(
-                "select attempt_id, job_id, lease_version, attempt_number, state, outcome, error_code, started_at, finished_at "
+                "select attempt_id, job_id, execution_id, lease_version, attempt_number, status, outcome, error_code, started_at, finished_at "
                 + "from autocheck.attempts where job_id = @jobId", connection);
             command.Parameters.AddWithValue("jobId", jobId);
             await using var reader = await command.ExecuteReaderAsync();
             Assert.True(await reader.ReadAsync());
-            return reader.GetString(4);
+            return reader.GetString(5);
         });
-        Assert.Equal("LEASED", attemptRow);
+        Assert.Equal("RUNNING", attemptRow);
     }
 
     // The container (and its workflow_job table) is shared by every test in

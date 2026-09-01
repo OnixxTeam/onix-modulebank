@@ -1,18 +1,24 @@
-# Неделя 1. Database-first action runtime
+# Неделя 1-2. Database-first action runtime и persistent workflow-ядро
 
 C# gateway и generic action runtime поверх PostgreSQL: клиент вызывает
 опубликованный action через единый маршрут, но не выбирает базу, schema,
-функцию, SQL, policy или предметный результат.
+функцию, SQL, policy или предметный результат. Неделя 2 продолжает тот же
+репозиторий: поверх action runtime добавлен versioned workflow-движок —
+опубликованные карты процессов, персистентное состояние в PostgreSQL и общий
+C# worker, исполняющий шаги без пересборки под конкретные actions или карты.
 
-Исходное условие задания без изменений — [`docs/TASK.md`](docs/TASK.md).
+Исходное условие недели 1 без изменений — [`docs/TASK.md`](docs/TASK.md).
 Точные контракты, JSON envelopes, error matrix, CLI semantics и колонки
 проверочных views — [`docs/contract-reference.md`](docs/contract-reference.md).
+Условие недели 2 и связанные материалы — [`docs/week2/`](docs/week2/).
 
 ## Решение
 
 ### Архитектура
 
-Четыре сервиса в Compose плюс одноразовый `bootstrap`:
+Ровно шесть сервисов в Compose — неделя 2 требует именно этот список
+([`docs/week2/TASK.md`](docs/week2/TASK.md#обязательный-интерфейс-запуска)),
+и открытая проверка строит и поднимает только их, по имени:
 
 - **`gateway`** (ASP.NET Core + YARP) — единственный сервис с опубликованным
   host-портом `8080`. Whitelist-прокси на `api` по Compose DNS: пропускает
@@ -22,18 +28,81 @@ C# gateway и generic action runtime поверх PostgreSQL: клиент вы�
   Проверяет JWT, строит server-side context, резолвит target из immutable
   action catalog, валидирует request/response schema, вызывает
   `api.invoke(...)` в одной Npgsql-транзакции, коммитит или откатывает.
+  `/health/ready` готов сразу по готовности PostgreSQL, ещё до применения
+  миграций — `api` не имеет `depends_on` ни на что, что могло бы это
+  отложить, только на `postgres`.
 - **`cli`** (`Course.Cli`) — entrypoint для contract commands: `migration
-  apply`, `action validate/publish/list/activate/disable`, `bootstrap`.
-- **`postgres`** — база `course`, роль `postgres`, данные в named volume.
-- **`bootstrap`** — одноразовый сервис (`command: bootstrap`), применяет
-  migrations и публикует встроенные actions до старта `api`
-  (`depends_on: service_completed_successfully`). Не публикует портов, не
-  входит в обязательную четвёрку и не завершает работу постоянно.
+  apply`, `action validate/publish/list/activate/disable`, `flow
+  validate/publish/list/activate/start/get/signal`, `bootstrap`. Ad hoc вызовы
+  (проверкой и `make`) идут через `compose run --rm cli <args>`, который
+  подставляет свою команду. Но у сервиса как такового, без override, есть
+  свой command по умолчанию — `bootstrap`: применяет migrations и публикует
+  встроенные actions/maps один раз и завершается. Так `docker compose up`
+  без ручного вмешательства получает готовый каталог, не заводя седьмой
+  сервис вне обязательного списка.
+- **`postgres`** — база `course`, роль `postgres`, данные в named volume. Роли
+  и `docker-entrypoint-initdb.d` запекаются в образ сборкой
+  ([`db/Dockerfile`](db/Dockerfile)) — Compose не держит ни одного bind mount
+  на репозиторий.
+- **`worker-a`**, **`worker-b`** — два экземпляра одного и того же образа
+  `workflow-worker:local` (см. [Worker](#worker) ниже).
 
 Направление вызовов: клиент → `gateway:8080` → `api` (Compose DNS) → JWT и
 context → catalog → `api.invoke` → зарегистрированная PostgreSQL-функция →
 commit/rollback. Подробности и границы доверия — [C4 Container](docs/c4/container.md),
 [ADR 0001](docs/adr/0001-trust-boundary.md), [ADR 0002](docs/adr/0002-technical-vs-domain-result.md).
+
+### Worker
+
+`Workflow.Worker` — общий C# исполнитель шагов `automatic`: не знает предметных
+имён actions или карт, только протокол шага. Цикл (`WorkerLoop.cs`):
+
+1. Захватывает готовую `job` под своим владельцем (`WORKFLOW_WORKER_OWNER`,
+   значения `worker-a`/`worker-b` в Compose) на аренду (`lease`).
+2. Отображает вход задачи через `input_mapping` карты, вызывает целевой action
+   через тот же `PostgresActionExecutor`, что и `api` — в чужой транзакции
+   исполнителя (см. [ADR](docs/adr) о префакторе тикета 01), под principal
+   `workflow_worker` с ограниченными scopes (`WORKFLOW_WORKER_SCOPES`).
+3. Атомарно завершает `job` и продвигает граф процесса в одной транзакции,
+   разграничивая устаревшее завершение по `lease version` (fencing).
+
+`worker-a` и `worker-b` собираются из одного `Workflow.Worker/Dockerfile` и
+запускают идентичный образ — Compose строит его один раз для `worker-a`,
+`worker-b` только на него ссылается (`image: workflow-worker:local` без
+собственного `build`). Публикация новых actions или карт не требует
+пересборки этого образа: он читает их из базы через тот же generic catalog.
+
+Интервалы аренды и поллинга берутся из `COURSE_TEST_PROFILE` (`1` — тестовый
+профиль: аренда 2s, poll ≤100ms; иначе production-профиль: аренда 30s, poll
+1s) с точечным override через `WORKFLOW_WORKER_LEASE_MS`/`_POLL_MS`.
+`COURSE_FAILPOINT` включает именованные точки останова для воспроизводимых
+аварийных сценариев (`Failpoints.cs`) — используется только тестовым
+профилем, в production не задан.
+
+### Workflow-карты
+
+Карта (`map`, документ `course-1`) описывает одну неизменяемую версию flow:
+`steps` (`automatic`, `wait_signal`, `manual`, `end`), `transitions` по
+outcome и `tasks` — контракт вызова action с policy, retry и mapping.
+Жизненный цикл, все через `cli`:
+
+```bash
+flow validate map.json          # схема + графовая семантика, без публикации
+flow publish  map.json          # идемпотентно по каноническому хешу карты
+flow list     <flow-name>        # опубликованные версии и активная
+flow activate <flow-name> <ver>  # ровно одна активная версия на flow
+flow start    <flow-name> --business-key <key> --data data.json
+flow get      <process-id>       # компактное состояние процесса
+flow signal   <process-id> --type <type> --message-id <id> --payload body.json
+```
+
+Запущенный процесс навсегда привязан (`pinned`) к версии карты, под которой
+стартовал — активация новой версии на уже запущенные процессы не влияет.
+Шаг `wait_signal` и шаг `manual` продвигаются одной и той же `flow signal`:
+идемпотентно по `message-id`, ранний сигнал (до того, как процесс дошёл до
+шага) допустим и учитывается при попадании на шаг. Полная выборка состояния
+процесса (история, попытки) идёт как обычный action (`workflow.get`) через
+`api.invoke`, а не через прямое соединение CLI.
 
 ### Запуск
 
@@ -49,7 +118,7 @@ make start_prod # docker compose up -d --build
 - `http://localhost:8080/openapi/default.json` содержит включённые default
   actions;
 - ручные SQL-команды и публикация встроенных actions не нужны — их выполняет
-  `bootstrap`.
+  `cli` своим command по умолчанию (`bootstrap`).
 
 ### Конфигурация
 
@@ -62,7 +131,8 @@ make start_prod # docker compose up -d --build
 | `COURSE_JWT_SIGNING_KEY` | HS256-ключ ≥ 32 байт; проверка подменяет через Compose override |
 | `COURSE_RUNTIME_DSN` | строка подключения ролью `course_runtime` |
 
-`cli` и `bootstrap` (один и тот же образ) собирают строку подключения сами:
+`cli` (тем же образом бежит и его команда по умолчанию, `bootstrap`) собирает
+строку подключения сама:
 
 | Переменная | Назначение |
 |---|---|
@@ -97,10 +167,12 @@ CLI нет одной общей пары credentials.
 ### Миграции
 
 Checksummed migrations в [`db/migrations`](db/migrations) применяет только
-сервис `bootstrap` при `docker compose up`, ролью `course_migrator`, до
-старта `api`. `api` подключается ролью `course_runtime` и не имеет migration
-credentials. Повторный `docker compose up` не переприменяет уже применённые
-миграции — раннер сверяет checksum.
+`cli` своим command по умолчанию (`bootstrap`) при `docker compose up`, ролью
+`course_migrator`, независимо от `api` (не блокирует и не блокируется его
+стартом, см. [Архитектура](#архитектура)). `api` подключается ролью
+`course_runtime` и не имеет migration credentials. Повторный
+`docker compose up` не переприменяет уже применённые миграции — раннер
+сверяет checksum.
 
 ### Проверка
 
@@ -115,19 +187,20 @@ make ci           # dotnet format --verify-no-changes + build -warnaserror + tes
 - `make logs SERVICE=<gateway|api|postgres|cli>` — логи сервиса;
 - `make psql` — psql-сессия в контейнер `postgres` (роль `postgres`);
 - `GET /health/live` (gateway и api) — liveness процесса;
-- `GET /health/ready` (api, через gateway) — готовность PostgreSQL и
-  завершённой инициализации; переживает остановку/восстановление PostgreSQL
-  без пересоздания `api`;
+- `GET /health/ready` (api, через gateway) — готовность соединения с
+  PostgreSQL (не ждёт применения миграций — это делает `cli bootstrap`
+  параллельно); переживает остановку/восстановление PostgreSQL без
+  пересоздания `api`;
 - `GET /openapi/default.json` и `/openapi/actions/{module}/{action}/{version}.json`
   — manifest-driven OpenAPI documents.
 
 ### Ограничения
 
-Не входит в неделю 1 (см. также [`docs/TASK.md`](docs/TASK.md#не-входит-в-неделю)):
-workflow maps и worker, `payment.submit` и provider-simulator, Outbox/Inbox,
-lease/retries/failpoints, отдельные C# handlers для предметных actions,
-CORS/rate limiting на gateway.
-
-Пятый сервис `bootstrap` не публикует портов и завершается после разового
-применения миграций и публикации встроенных actions — обязательная четвёрка
-(`gateway`, `api`, `cli`, `postgres`) от этого не страдает.
+Не входило в неделю 1 (см. также [`docs/TASK.md`](docs/TASK.md#не-входит-в-неделю))
+и закрыто неделей 2 выше: workflow maps и worker, lease/retries/failpoints.
+Всё ещё вне обеих недель: `payment.submit` и provider-simulator, Outbox/Inbox,
+отдельные C# handlers для предметных actions, CORS/rate limiting на gateway,
+параллельные развилки, таймеры, циклы, подпроцессы, компенсации, импорт и
+экспорт BPMN, графический редактор карт, перевод запущенного процесса между
+версиями, произвольные выражения и запросы из карты, ветвление кода по
+именам, завершение ручного шага через публичное действие.
