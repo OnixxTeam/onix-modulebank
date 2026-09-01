@@ -7,9 +7,9 @@ C# gateway и generic action runtime поверх PostgreSQL: клиент вы�
 опубликованные карты процессов, персистентное состояние в PostgreSQL и общий
 C# worker, исполняющий шаги без пересборки под конкретные actions или карты.
 
-Исходное условие недели 1 без изменений — [`docs/TASK.md`](docs/TASK.md).
+Исходное условие недели 1 без изменений — [`docs/week1/TASK.md`](docs/week1/TASK.md).
 Точные контракты, JSON envelopes, error matrix, CLI semantics и колонки
-проверочных views — [`docs/contract-reference.md`](docs/contract-reference.md).
+проверочных views — [`docs/week1/contract-reference.md`](docs/week1/contract-reference.md).
 Условие недели 2 и связанные материалы — [`docs/week2/`](docs/week2/).
 
 ## Решение
@@ -49,8 +49,12 @@ C# worker, исполняющий шаги без пересборки под к
 
 Направление вызовов: клиент → `gateway:8080` → `api` (Compose DNS) → JWT и
 context → catalog → `api.invoke` → зарегистрированная PostgreSQL-функция →
-commit/rollback. Подробности и границы доверия — [C4 Container](docs/c4/container.md),
-[ADR 0001](docs/adr/0001-trust-boundary.md), [ADR 0002](docs/adr/0002-technical-vs-domain-result.md).
+commit/rollback. Подробности, границы доверия и принятые решения —
+[C4 Container](docs/c4/container.md), [ADR 0001](docs/adr/0001-trust-boundary.md) (граница
+доверия), [ADR 0002](docs/adr/0002-technical-vs-domain-result.md) (технический/предметный
+результат), [ADR 0003](docs/adr/0003-lease-fencing-effect-idempotency.md) (аренда и
+идемпотентность эффекта), [ADR 0004](docs/adr/0004-graph-interpreted-in-database.md) (граф в
+PostgreSQL, не в C#).
 
 ### Worker
 
@@ -196,7 +200,7 @@ make ci           # dotnet format --verify-no-changes + build -warnaserror + tes
 
 ### Ограничения
 
-Не входило в неделю 1 (см. также [`docs/TASK.md`](docs/TASK.md#не-входит-в-неделю))
+Не входило в неделю 1 (см. также [`docs/week1/TASK.md`](docs/week1/TASK.md#не-входит-в-неделю))
 и закрыто неделей 2 выше: workflow maps и worker, lease/retries/failpoints.
 Всё ещё вне обеих недель: `payment.submit` и provider-simulator, Outbox/Inbox,
 отдельные C# handlers для предметных actions, CORS/rate limiting на gateway,

@@ -98,6 +98,18 @@ _Avoid_: Message, event, уведомление
 Строка append-only истории процесса. История дополняется и никогда не переписывается.
 _Avoid_: Log, audit, changelog
 
+**Start data**:
+Неизменяемый JSON, переданный `flow start --data`. Ключ идемпотентности запуска сравнивается
+только по нему; после старта не меняется никогда.
+_Avoid_: Input, payload, request body
+
+**Process data**:
+Накопленное состояние процесса: при старте — копия start data, дальше на каждый завершённый
+`automatic`-шаг под его собственным step key добавляется результат. Источник `input_mapping`
+(TASK.md "Mapping": "source process data pointer") — первый шаг может читать start data через
+него ровно потому, что она уже там при создании процесса.
+_Avoid_: State, context, variables
+
 ### Аренда и разграничение
 
 **Lease**:
