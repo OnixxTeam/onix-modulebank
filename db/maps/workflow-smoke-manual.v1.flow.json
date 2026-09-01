@@ -1,0 +1,30 @@
+{
+  "contract_version": "course-1",
+  "flow_name": "workflow-smoke-manual",
+  "version": 1,
+  "start_step": "probe",
+  "steps": [
+    {
+      "key": "probe",
+      "type": "automatic",
+      "task": {
+        "service": "postgres",
+        "module": "workflow",
+        "action": "probe",
+        "action_version": 1,
+        "required_policy": ["workflow:execute"],
+        "timeout_ms": 5000,
+        "retry": {"max_attempts": 1, "delays_ms": []},
+        "input_mapping": {},
+        "input_constants": {"mode": "MANUAL", "value": "workflow-smoke-manual"}
+      }
+    },
+    {"key": "review", "type": "manual", "allowed_outcomes": ["APPROVED"]},
+    {"key": "end", "type": "end", "outcome": "DONE"}
+  ],
+  "transitions": [
+    {"from": "probe", "outcome": "SUCCEEDED", "to": "end"},
+    {"from": "probe", "outcome": "ROUTE_MANUAL", "to": "review"},
+    {"from": "review", "outcome": "APPROVED", "to": "end"}
+  ]
+}

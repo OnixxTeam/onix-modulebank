@@ -20,5 +20,6 @@ WORKDIR /app
 COPY --from=build /app/publish ./
 COPY db/migrations ./migrations
 COPY db/manifests ./manifests
+COPY db/maps ./maps
 
 ENTRYPOINT ["dotnet", "Course.Cli.dll"]
