@@ -16,7 +16,9 @@ C# worker, исполняющий шаги без пересборки под к
 
 ### Архитектура
 
-Четыре сервиса в Compose плюс одноразовый `bootstrap`:
+Ровно шесть сервисов в Compose — неделя 2 требует именно этот список
+([`docs/week2/TASK.md`](docs/week2/TASK.md#обязательный-интерфейс-запуска)),
+и открытая проверка строит и поднимает только их, по имени:
 
 - **`gateway`** (ASP.NET Core + YARP) — единственный сервис с опубликованным
   host-портом `8080`. Whitelist-прокси на `api` по Compose DNS: пропускает
@@ -26,17 +28,22 @@ C# worker, исполняющий шаги без пересборки под к
   Проверяет JWT, строит server-side context, резолвит target из immutable
   action catalog, валидирует request/response schema, вызывает
   `api.invoke(...)` в одной Npgsql-транзакции, коммитит или откатывает.
+  `/health/ready` готов сразу по готовности PostgreSQL, ещё до применения
+  миграций — `api` не имеет `depends_on` ни на что, что могло бы это
+  отложить, только на `postgres`.
 - **`cli`** (`Course.Cli`) — entrypoint для contract commands: `migration
   apply`, `action validate/publish/list/activate/disable`, `flow
-  validate/publish/list/activate/start/get/signal`, `bootstrap`.
+  validate/publish/list/activate/start/get/signal`, `bootstrap`. Ad hoc вызовы
+  (проверкой и `make`) идут через `compose run --rm cli <args>`, который
+  подставляет свою команду. Но у сервиса как такового, без override, есть
+  свой command по умолчанию — `bootstrap`: применяет migrations и публикует
+  встроенные actions/maps один раз и завершается. Так `docker compose up`
+  без ручного вмешательства получает готовый каталог, не заводя седьмой
+  сервис вне обязательного списка.
 - **`postgres`** — база `course`, роль `postgres`, данные в named volume. Роли
   и `docker-entrypoint-initdb.d` запекаются в образ сборкой
   ([`db/Dockerfile`](db/Dockerfile)) — Compose не держит ни одного bind mount
   на репозиторий.
-- **`bootstrap`** — одноразовый сервис (`command: bootstrap`), применяет
-  migrations и публикует встроенные actions до старта `api`
-  (`depends_on: service_completed_successfully`). Не публикует портов, не
-  входит в обязательную четвёрку и не завершает работу постоянно.
 - **`worker-a`**, **`worker-b`** — два экземпляра одного и того же образа
   `workflow-worker:local` (см. [Worker](#worker) ниже).
 
@@ -111,7 +118,7 @@ make start_prod # docker compose up -d --build
 - `http://localhost:8080/openapi/default.json` содержит включённые default
   actions;
 - ручные SQL-команды и публикация встроенных actions не нужны — их выполняет
-  `bootstrap`.
+  `cli` своим command по умолчанию (`bootstrap`).
 
 ### Конфигурация
 
@@ -124,7 +131,8 @@ make start_prod # docker compose up -d --build
 | `COURSE_JWT_SIGNING_KEY` | HS256-ключ ≥ 32 байт; проверка подменяет через Compose override |
 | `COURSE_RUNTIME_DSN` | строка подключения ролью `course_runtime` |
 
-`cli` и `bootstrap` (один и тот же образ) собирают строку подключения сами:
+`cli` (тем же образом бежит и его команда по умолчанию, `bootstrap`) собирает
+строку подключения сама:
 
 | Переменная | Назначение |
 |---|---|
@@ -159,10 +167,12 @@ CLI нет одной общей пары credentials.
 ### Миграции
 
 Checksummed migrations в [`db/migrations`](db/migrations) применяет только
-сервис `bootstrap` при `docker compose up`, ролью `course_migrator`, до
-старта `api`. `api` подключается ролью `course_runtime` и не имеет migration
-credentials. Повторный `docker compose up` не переприменяет уже применённые
-миграции — раннер сверяет checksum.
+`cli` своим command по умолчанию (`bootstrap`) при `docker compose up`, ролью
+`course_migrator`, независимо от `api` (не блокирует и не блокируется его
+стартом, см. [Архитектура](#архитектура)). `api` подключается ролью
+`course_runtime` и не имеет migration credentials. Повторный
+`docker compose up` не переприменяет уже применённые миграции — раннер
+сверяет checksum.
 
 ### Проверка
 
@@ -177,9 +187,10 @@ make ci           # dotnet format --verify-no-changes + build -warnaserror + tes
 - `make logs SERVICE=<gateway|api|postgres|cli>` — логи сервиса;
 - `make psql` — psql-сессия в контейнер `postgres` (роль `postgres`);
 - `GET /health/live` (gateway и api) — liveness процесса;
-- `GET /health/ready` (api, через gateway) — готовность PostgreSQL и
-  завершённой инициализации; переживает остановку/восстановление PostgreSQL
-  без пересоздания `api`;
+- `GET /health/ready` (api, через gateway) — готовность соединения с
+  PostgreSQL (не ждёт применения миграций — это делает `cli bootstrap`
+  параллельно); переживает остановку/восстановление PostgreSQL без
+  пересоздания `api`;
 - `GET /openapi/default.json` и `/openapi/actions/{module}/{action}/{version}.json`
   — manifest-driven OpenAPI documents.
 
@@ -193,7 +204,3 @@ make ci           # dotnet format --verify-no-changes + build -warnaserror + tes
 экспорт BPMN, графический редактор карт, перевод запущенного процесса между
 версиями, произвольные выражения и запросы из карты, ветвление кода по
 именам, завершение ручного шага через публичное действие.
-
-Пятый сервис `bootstrap` не публикует портов и завершается после разового
-применения миграций и публикации встроенных actions — обязательная четвёрка
-(`gateway`, `api`, `cli`, `postgres`) от этого не страдает.

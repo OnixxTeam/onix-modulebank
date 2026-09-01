@@ -79,6 +79,25 @@ public sealed class WorkerLoopTests
     }
 
     [Fact]
+    public async Task RunOnce_MappingDrawsFromFlowStartData_OnTheVeryFirstStep_Succeeds()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateFirstStepMappingFlowAsync(flowName);
+        var startData = new JsonObject { ["startValue"] = "from-flow-start" };
+        var processId = await StartProcessAsync(flowName, startData);
+
+        var result = await CreateLoop(NewOwner()).RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(WorkerStepOutcome.Succeeded, result.Outcome);
+
+        var processData = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select process_data::text from workflow.process_instance where process_id = @processId", ("processId", processId));
+        var parsed = JsonNode.Parse(processData)!;
+        Assert.Equal("from-flow-start", parsed["startValue"]!.GetValue<string>());
+        Assert.Equal("from-flow-start", parsed["probe"]!["value"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task RunOnce_MappingDrawsFromAPriorStepsResult_AndReachesTheTarget()
     {
         var flowName = NewFlowName();
@@ -353,9 +372,8 @@ public sealed class WorkerLoopTests
         """;
 
     // A single automatic step whose payload comes entirely from input_constants
-    // -- no process-data dependency, so it works on the very first step of a
-    // process (process_data starts empty; only a completed step's own result
-    // populates it).
+    // -- no process-data dependency at all, unlike the first-step-mapping
+    // fixture below which does depend on flow start's own data.
     private async Task PublishAndActivateConstantsOnlyFlowAsync(string flowName, string mode, string value)
     {
         var document = JsonNode.Parse($$"""
@@ -381,9 +399,10 @@ public sealed class WorkerLoopTests
         await PublishAndActivateAsync(flowName, document);
     }
 
-    // input_mapping's one entry always misses on the very first step: process
-    // data starts as '{}' (SPEC: only a completed step's result populates it),
-    // so any source pointer here is unresolvable without a second fixture.
+    // process_data is seeded from flow start's own data (migration 028), but
+    // StartProcessAsync below always starts with an empty object, and this
+    // fixture's source pointer doesn't match any key a completed step could
+    // have produced either -- so it stays genuinely unresolvable.
     private async Task PublishAndActivateMissingMappingFlowAsync(string flowName)
     {
         var document = JsonNode.Parse($$"""
@@ -398,6 +417,45 @@ public sealed class WorkerLoopTests
               "transitions": [
                 {"from": "probe", "outcome": "SUCCEEDED", "to": "end"},
                 {"from": "probe", "outcome": "ROUTE_MANUAL", "to": "end"}
+              ]
+            }
+            """)!;
+
+        await PublishAndActivateAsync(flowName, document);
+    }
+
+    // The very first step maps its payload straight from flow start's own
+    // data (migration 028: process_data is seeded from start_data), proving
+    // a caller can parameterize the first step via `flow start --data`
+    // without a constants-only detour.
+    private async Task PublishAndActivateFirstStepMappingFlowAsync(string flowName)
+    {
+        var document = JsonNode.Parse($$"""
+            {
+              "flow_name": "{{flowName}}",
+              "version": 1,
+              "start_step": "probe",
+              "steps": [
+                {
+                  "key": "probe",
+                  "type": "automatic",
+                  "task": {
+                    "module": "workflow",
+                    "action": "probe",
+                    "action_version": 1,
+                    "required_policy": ["workflow:execute"],
+                    "timeout_ms": 5000,
+                    "retry": {"max_attempts": 1, "delays_ms": []},
+                    "input_mapping": {"/value": "/startValue"},
+                    "input_constants": {"mode": "SUCCESS"}
+                  }
+                },
+                {"key": "wait", "type": "wait_signal", "signal_type": "test.signal", "outcome": "SIGNALED"},
+                {"key": "end", "type": "end", "outcome": "DONE"}
+              ],
+              "transitions": [
+                {"from": "probe", "outcome": "SUCCEEDED", "to": "wait"},
+                {"from": "wait", "outcome": "SIGNALED", "to": "end"}
               ]
             }
             """)!;
@@ -463,9 +521,10 @@ public sealed class WorkerLoopTests
         }
     }
 
-    private async Task<Guid> StartProcessAsync(string flowName)
+    private Task<Guid> StartProcessAsync(string flowName) => StartProcessAsync(flowName, new JsonObject());
+
+    private async Task<Guid> StartProcessAsync(string flowName, JsonObject startData)
     {
-        var startData = new JsonObject();
         var started = await factory.Postgres.ProcessRuntime.StartAsync(
             flowName, NewBusinessKey(), startData, JsonCanonicalizer.Sha256Hex(startData), CancellationToken.None);
         if (started["status"]!.GetValue<string>() != "ok")

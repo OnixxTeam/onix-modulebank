@@ -39,11 +39,13 @@ builder.Services.AddSingleton<IJwtAuthenticator>(new JwtContextFactory(jwtOption
 
 var app = builder.Build();
 
-// Migrations and manifest publication run in the separate `bootstrap` service
-// before this container ever starts (compose depends_on: service_completed_successfully),
-// so this process has no async startup work of its own -- the flag flips as soon as
-// the host has finished building, distinct from (and required alongside) the "select 1"
-// dependency check.
+// This process has no async startup work of its own and does not wait on schema or
+// built-in publication -- readiness flips as soon as the host has finished building,
+// distinct from (and required alongside) the "select 1" dependency check below.
+// Migrations/publication happen in the separate `bootstrap` service (compose
+// depends_on: postgres, not this container) or, for the checker's own fixtures,
+// through explicit `cli migration apply` / `cli action publish` calls -- neither is
+// a startup precondition for `api` itself.
 var readiness = new ReadinessState();
 readiness.MarkInitialized();
 
