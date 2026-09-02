@@ -179,6 +179,7 @@ public sealed class WorkerLoop(
 
         var claims = new VerifiedClaims(WorkflowWorkerPrincipal.Name, WorkflowWorkerPrincipal.Name, scopes);
         var manifest = new PrefetchedManifest(
+            Version: task["actionVersion"]!.GetValue<int>(),
             RequestSchema: task["requestSchema"]!,
             ResponseSchema: task["responseSchema"]!,
             Outcomes: task["outcomes"]!.AsArray().Select(node => node!.GetValue<string>()).ToList(),

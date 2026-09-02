@@ -124,6 +124,39 @@ public sealed class ExecutorTransactionTests(ApiFactory factory)
         Assert.True(deadline > before.AddSeconds(30), "deadline should reflect the 60s override, not the manifest's 5s timeout");
     }
 
+    // Ticket 02 acceptance: before this fix, the prefetched-manifest branch
+    // dereferenced explicitVersion via `!` unconditionally -- a caller (only
+    // ever WorkerLoop today) that set callerContext.Manifest without also
+    // passing a matching explicitVersion got a NullReferenceException instead
+    // of a controlled outcome. Passing explicitVersion: null here proves the
+    // branch no longer reads that argument at all: it resolves the version
+    // from PrefetchedManifest.Version alone.
+    [Fact]
+    public async Task PrefetchedManifest_ResolvesVersionFromItself_NotFromExplicitVersion()
+    {
+        await using var dataSource = NpgsqlDataSource.Create(factory.Postgres.RuntimeConnectionString);
+        var executor = CreateExecutor(dataSource);
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        var manifest = new PrefetchedManifest(
+            Version: 1,
+            RequestSchema: JsonNode.Parse("""{"type":"object"}""")!,
+            ResponseSchema: JsonNode.Parse("""{"type":"object"}""")!,
+            Outcomes: ["ECHOED"],
+            RequiredPolicy: []);
+        var callerContext = new ActionCallerContext(Manifest: manifest);
+
+        var outcome = await executor.ExecuteInTransactionAsync(
+            connection, transaction, "testfixture", "echo_context", explicitVersion: null, Claims, Guid.NewGuid(), null,
+            new JsonObject(), callerContext, CancellationToken.None);
+
+        await transaction.CommitAsync();
+
+        Assert.True(outcome.Result.IsSuccess);
+        Assert.Equal(1, outcome.Result.ActionVersion);
+    }
+
     [Fact]
     public async Task NetworkPath_NeverSendsWorkflowIdentifiers()
     {
