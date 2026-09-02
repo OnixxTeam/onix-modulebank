@@ -18,6 +18,13 @@ public enum WorkerStepOutcome
     // loop is the only caller allowed to treat this as "sleep and try again".
     NoJob,
 
+    // The claim call itself threw (cold-start race against bootstrap's
+    // migrations: workflow.claim_jobs undefined or workflow_worker not yet
+    // granted EXECUTE on it, both PostgresException). No job was ever claimed,
+    // so there is nothing to roll back or fail -- RunAsync's poll loop treats
+    // this exactly like NoJob and tries again after the same pause.
+    ClaimFailed,
+
     // Mapping or request-schema validation rejected the step before the target
     // was ever invoked -- both non-retryable (SPEC: mapping/contract errors never
     // retry), both recorded through fail_job with no action transaction to roll
@@ -53,6 +60,7 @@ public enum WorkerStepOutcome
 public sealed record WorkerStepResult(WorkerStepOutcome Outcome, string? ErrorCode = null)
 {
     public static readonly WorkerStepResult NoJob = new(WorkerStepOutcome.NoJob);
+    public static readonly WorkerStepResult ClaimFailed = new(WorkerStepOutcome.ClaimFailed);
     public static readonly WorkerStepResult Succeeded = new(WorkerStepOutcome.Succeeded);
     public static readonly WorkerStepResult MappingMissing = new(WorkerStepOutcome.MappingMissing, WorkflowErrorCodes.MappingMissing);
     public static readonly WorkerStepResult RequestInvalid = new(WorkerStepOutcome.RequestInvalid, WorkflowErrorCodes.RequestInvalid);
@@ -88,7 +96,23 @@ public sealed class WorkerLoop(
 
     public async Task<WorkerStepResult> RunOnceAsync(CancellationToken cancellationToken)
     {
-        var claimed = await jobRuntime.ClaimAsync(owner, intervals.LeaseMs, cancellationToken);
+        JsonNode claimed;
+        try
+        {
+            claimed = await jobRuntime.ClaimAsync(owner, intervals.LeaseMs, cancellationToken);
+        }
+        // Cold-start race (SPEC ticket): bootstrap's migrations may not have run
+        // yet, so workflow.claim_jobs can be undefined or not yet granted to
+        // workflow_worker. Caught around the claim alone, not around job
+        // processing -- that has its own error handling below and must keep
+        // doing it. A genuine external cancellation (worker shutdown) is left
+        // to propagate rather than swallowed as a claim failure.
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine($"[{owner}] job claim failed, will retry: {exception.Message}");
+            return WorkerStepResult.ClaimFailed;
+        }
+
         var job = claimed["job"];
         if (job is null || job.GetValueKind() == JsonValueKind.Null)
         {
@@ -103,7 +127,7 @@ public sealed class WorkerLoop(
         while (!cancellationToken.IsCancellationRequested)
         {
             var result = await RunOnceAsync(cancellationToken);
-            if (result.Outcome == WorkerStepOutcome.NoJob)
+            if (result.Outcome is WorkerStepOutcome.NoJob or WorkerStepOutcome.ClaimFailed)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(intervals.PollIntervalMs), clock, cancellationToken);
             }
