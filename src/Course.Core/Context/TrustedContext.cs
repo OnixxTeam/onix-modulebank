@@ -8,10 +8,20 @@ public sealed record VerifiedClaims(string Principal, string Consumer, IReadOnly
 // Built once the manifest is known (Deadline needs manifest.TimeoutMs), never from
 // payload. CorrelationId is always a fresh runtime UUID; RequestId mirrors the
 // Idempotency-Key header verbatim, or null if the caller sent none.
+//
+// ProcessId/JobId/ExecutionId/AttemptId exist only for the workflow worker: the
+// network path leaves all four null, and the pipeline serializes each into
+// api.invoke's context only when set, so target functions see the exact same
+// context shape as before. ExecutionId is the subject-effect idempotency key --
+// target functions read it under this name.
 public sealed record TrustedContext(
     string Principal,
     string Consumer,
     IReadOnlyList<string> Scopes,
     Guid CorrelationId,
     string? RequestId,
-    DateTimeOffset Deadline);
+    DateTimeOffset Deadline,
+    Guid? ProcessId = null,
+    Guid? JobId = null,
+    string? ExecutionId = null,
+    Guid? AttemptId = null);

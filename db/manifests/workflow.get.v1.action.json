@@ -1,0 +1,138 @@
+{
+  "contract_version": "course-1",
+  "module": "workflow",
+  "action": "get",
+  "version": 1,
+  "http_method": "POST",
+  "target_schema": "workflow",
+  "target_function": "get_v1",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:workflow-get-payload",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "processId"
+    ],
+    "properties": {
+      "processId": {
+        "type": "string",
+        "format": "uuid"
+      }
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:workflow-get-response",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "process",
+      "steps",
+      "jobs",
+      "attempts"
+    ],
+    "properties": {
+      "process": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "processId",
+          "businessKey",
+          "flowName",
+          "flowVersion",
+          "state",
+          "currentStepKey",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "processId": {"type": "string", "format": "uuid"},
+          "businessKey": {"type": "string"},
+          "flowName": {"type": "string"},
+          "flowVersion": {"type": "integer", "minimum": 1},
+          "state": {
+            "enum": ["CREATED", "RUNNING", "WAITING_SIGNAL", "WAITING_MANUAL", "COMPLETED", "FAILED"]
+          },
+          "currentStepKey": {"type": "string"},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "updatedAt": {"type": "string", "format": "date-time"}
+        }
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stepInstanceId", "stepKey", "stepType", "state", "outcome", "enteredAt", "completedAt"],
+          "properties": {
+            "stepInstanceId": {"type": "string", "format": "uuid"},
+            "stepKey": {"type": "string"},
+            "stepType": {"enum": ["AUTOMATIC", "WAIT_SIGNAL", "MANUAL", "END"]},
+            "state": {"enum": ["PENDING", "READY", "RUNNING", "WAITING", "COMPLETED", "FAILED"]},
+            "outcome": {"type": ["string", "null"]},
+            "enteredAt": {"type": "string", "format": "date-time"},
+            "completedAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        }
+      },
+      "jobs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "jobId", "processId", "stepInstanceId", "executionId", "state",
+            "leaseOwner", "leaseVersion", "leaseUntil", "attemptCount", "nextAttemptAt"
+          ],
+          "properties": {
+            "jobId": {"type": "string", "format": "uuid"},
+            "processId": {"type": "string", "format": "uuid"},
+            "stepInstanceId": {"type": "string", "format": "uuid"},
+            "executionId": {"type": "string"},
+            "state": {"enum": ["READY", "LEASED", "RETRY_WAIT", "SUCCEEDED", "DEAD"]},
+            "leaseOwner": {"type": ["string", "null"]},
+            "leaseVersion": {"type": "integer"},
+            "leaseUntil": {"type": ["string", "null"], "format": "date-time"},
+            "attemptCount": {"type": "integer"},
+            "nextAttemptAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        }
+      },
+      "attempts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attemptId", "jobId", "executionId", "leaseVersion", "attemptNumber",
+            "status", "outcome", "errorCode", "startedAt", "finishedAt"
+          ],
+          "properties": {
+            "attemptId": {"type": "string", "format": "uuid"},
+            "jobId": {"type": "string", "format": "uuid"},
+            "executionId": {"type": "string"},
+            "leaseVersion": {"type": "integer"},
+            "attemptNumber": {"type": "integer"},
+            "status": {"enum": ["RUNNING", "SUCCEEDED", "FAILED", "STALE"]},
+            "outcome": {"type": ["string", "null"]},
+            "errorCode": {"type": ["string", "null"]},
+            "startedAt": {"type": "string", "format": "date-time"},
+            "finishedAt": {"type": ["string", "null"], "format": "date-time"}
+          }
+        }
+      }
+    }
+  },
+  "outcomes": [
+    "FOUND"
+  ],
+  "required_policy": [
+    "workflow:read"
+  ],
+  "idempotency_mode": "none",
+  "idempotency_scope": "none",
+  "timeout_ms": 5000,
+  "enabled": true,
+  "is_default": true
+}

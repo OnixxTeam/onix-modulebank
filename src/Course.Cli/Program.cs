@@ -3,6 +3,10 @@ using Course.Cli.Commands;
 using Course.Core.Cli;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Validation;
+using Workflow.Core.Catalog;
+using Workflow.Core.Maps;
+using Workflow.Core.Security;
+using Workflow.Core.Validation;
 
 try
 {
@@ -21,6 +25,12 @@ try
                 new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 new JsonSchemaValidator(),
                 ManifestSchema.Load(),
+                // Baked in by the Dockerfile (COPY db/migrations ->
+                // /app/migrations, COPY db/manifests -> /app/manifests), since
+                // the bootstrap service runs unattended with no operator to
+                // pass directory arguments.
+                migrationsDirectory: "/app/migrations",
+                manifestsDirectory: "/app/manifests",
                 CancellationToken.None);
             break;
         case "action validate":
@@ -51,6 +61,55 @@ try
                 new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 CancellationToken.None);
             break;
+        case "flow validate":
+            envelope = await FlowValidateCommand.ExecuteAsync(
+                parsed,
+                BuildWorkflowMapValidator(),
+                CancellationToken.None);
+            break;
+        case "flow publish":
+            envelope = await FlowPublishCommand.ExecuteAsync(
+                parsed,
+                BuildWorkflowMapValidator(),
+                new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow list":
+            envelope = await FlowListCommand.ExecuteAsync(
+                new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow activate":
+            envelope = await FlowActivateCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow start":
+            envelope = await FlowStartCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow get":
+            envelope = await FlowGetCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow signal":
+            envelope = await FlowSignalCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowProcessRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                CancellationToken.None);
+            break;
+        case "flow test-finish":
+            envelope = await FlowTestFinishCommand.ExecuteAsync(
+                parsed,
+                new PostgresWorkflowJobRuntime(BuildConnectionString("workflow_worker", "WORKFLOW_WORKER_PASSWORD")),
+                Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1",
+                CancellationToken.None);
+            break;
         default:
             Console.Error.WriteLine($"unknown command: {parsed.Name}");
             Console.Out.Write(CliEnvelope.Fail("command.unknown", $"unknown command: {parsed.Name}").ToJson());
@@ -71,6 +130,19 @@ catch (Exception ex)
     Console.Error.WriteLine(ex);
     Console.Out.Write(CliEnvelope.Fail("internal.error", "unexpected CLI failure").ToJson());
     return 1;
+}
+
+static WorkflowMapValidator BuildWorkflowMapValidator() => new(
+    new JsonSchemaValidator(),
+    MapSchema.Load(),
+    new ActionPublisherCatalog(
+        new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD"))),
+    WorkerScopes());
+
+static string[] WorkerScopes()
+{
+    var raw = Environment.GetEnvironmentVariable("WORKFLOW_WORKER_SCOPES");
+    return string.IsNullOrEmpty(raw) ? [.. WorkflowWorkerPrincipal.DefaultScopes] : raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 }
 
 static string BuildConnectionString(string username, string passwordEnvironmentVariable)

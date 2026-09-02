@@ -2,9 +2,13 @@ using Course.Core.Cli;
 
 namespace Course.Cli.Commands;
 
-// Shared by action activate and action disable: both take a "module.action"
-// positional and one or more --version-shaped options, and both must reject
-// a malformed value before ever opening a database connection.
+// TryParseRouteKey is shared by action activate and action disable: both take
+// a "module.action" positional and must reject a malformed value before ever
+// opening a database connection. TryParseVersion is shared more broadly by
+// any command with an integer option that must reject a malformed value the
+// same way -- an action or flow version, or (flow test-finish) a lease
+// version -- "version" here just means "the integer option named by
+// optionName", not necessarily a manifest version.
 internal static class ActionRouteArguments
 {
     public static bool TryParseRouteKey(string raw, out string module, out string action, out CliEnvelope? error)

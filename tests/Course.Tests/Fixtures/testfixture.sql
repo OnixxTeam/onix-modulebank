@@ -80,3 +80,24 @@ end;
 $$;
 
 revoke all on function testfixture.echo_v1(jsonb, jsonb) from public;
+
+-- Reflects the trusted context straight back as the result, so C#-side tests can
+-- assert on exactly what api.invoke received: whether workflow identifiers
+-- (processId/jobId/executionId/attemptId) were serialized in, and what deadline
+-- the executor computed from the manifest's timeout_ms or a caller override.
+create function testfixture.echo_context_v1(p_context jsonb, p_payload jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  return jsonb_build_object(
+    'status', 'ok',
+    'outcome', 'ECHOED',
+    'result', p_context
+  );
+end;
+$$;
+
+revoke all on function testfixture.echo_context_v1(jsonb, jsonb) from public;
