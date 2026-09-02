@@ -122,6 +122,36 @@ public sealed class WorkerLoopTests
         Assert.Equal("WAITING_SIGNAL", processState);
     }
 
+    // Ticket 01 acceptance: a claim call that throws (cold-start race against
+    // bootstrap's migrations) must not crash RunOnceAsync -- it comes back as
+    // ClaimFailed, and once the underlying source starts working again the
+    // very next call reaches and processes the waiting job.
+    [Fact]
+    public async Task RunOnce_ClaimThrows_ReturnsClaimFailed_ThenSucceedsOnceClaimingRecovers()
+    {
+        var flowName = NewFlowName();
+        var value = $"claim-retry-{Guid.NewGuid():N}";
+        await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "SUCCESS", value: value);
+        var processId = await StartProcessAsync(flowName);
+
+        var owner = NewOwner();
+        var flakyRuntime = new FlakyClaimJobRuntime(factory.Postgres.JobRuntime, failuresBeforeSuccess: 2);
+        var loop = CreateLoop(owner, flakyRuntime);
+
+        var first = await loop.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.ClaimFailed, first.Outcome);
+
+        var second = await loop.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.ClaimFailed, second.Outcome);
+
+        var third = await loop.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(WorkerStepOutcome.Succeeded, third.Outcome);
+
+        var jobState = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select state from workflow.workflow_job where process_id = @processId", ("processId", processId));
+        Assert.Equal("SUCCEEDED", jobState);
+    }
+
     [Fact]
     public async Task RunOnce_NoReadyJob_ReturnsNoJob()
     {
@@ -312,15 +342,48 @@ public sealed class WorkerLoopTests
     // safe even though this loop talks to Postgres as workflow_worker.
     private WorkerLoop CreateLoop(string owner) => CreateLoop(owner, failpoints: null);
 
-    private WorkerLoop CreateLoop(string owner, IFailpointGate? failpoints)
+    private WorkerLoop CreateLoop(string owner, IFailpointGate? failpoints) =>
+        CreateLoop(owner, factory.Postgres.JobRuntime, failpoints);
+
+    private WorkerLoop CreateLoop(string owner, IWorkflowJobRuntime jobRuntime) => CreateLoop(owner, jobRuntime, failpoints: null);
+
+    private WorkerLoop CreateLoop(string owner, IWorkflowJobRuntime jobRuntime, IFailpointGate? failpoints)
     {
         var dataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
         var validator = factory.Services.GetRequiredService<ISchemaValidator>();
         var actionExecutor = (PostgresActionExecutor)factory.Services.GetRequiredService<IActionExecutor>();
 
         return new WorkerLoop(
-            owner, dataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
+            owner, dataSource, jobRuntime, actionExecutor, validator, TimeProvider.System,
             new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes, failpoints);
+    }
+
+    // Delegates every call to the real runtime except the first N ClaimAsync
+    // calls, which throw instead -- standing in for workflow.claim_jobs being
+    // undefined or ungranted while bootstrap's migrations haven't landed yet
+    // (ticket 01). Any Exception works for this test: WorkerLoop's catch around
+    // the claim is not typed to PostgresException specifically.
+    private sealed class FlakyClaimJobRuntime(IWorkflowJobRuntime inner, int failuresBeforeSuccess) : IWorkflowJobRuntime
+    {
+        private int remainingFailures = failuresBeforeSuccess;
+
+        public Task<JsonNode> ClaimAsync(string owner, int leaseMs, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Decrement(ref remainingFailures) >= 0)
+            {
+                throw new InvalidOperationException("simulated claim failure: workflow.claim_jobs not ready yet");
+            }
+
+            return inner.ClaimAsync(owner, leaseMs, cancellationToken);
+        }
+
+        public Task<JsonNode> FinishAsync(
+            Guid jobId, string owner, int leaseVersion, string outcome, JsonNode result, CancellationToken cancellationToken) =>
+            inner.FinishAsync(jobId, owner, leaseVersion, outcome, result, cancellationToken);
+
+        public Task<JsonNode> FailAsync(
+            Guid jobId, string owner, int leaseVersion, string errorCode, bool retryable, CancellationToken cancellationToken) =>
+            inner.FailAsync(jobId, owner, leaseVersion, errorCode, retryable, cancellationToken);
     }
 
     // Scoped to this one process's job (via its execution id, the dispatch's own
