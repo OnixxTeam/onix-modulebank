@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
+using Course.Core.Migrations;
 using Course.Infrastructure.Postgres;
 using Course.Tests.Support;
 using Npgsql;
@@ -51,11 +52,14 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public IWorkflowJobRuntime JobRuntime { get; private set; } = null!;
 
+    public IMigrationRunner MigrationRunner { get; private set; } = null!;
+
     public async Task InitializeAsync()
     {
         await container.StartAsync();
 
         var migrator = new PostgresMigrationRunner(BuildConnectionString("course_migrator", MigratorPassword));
+        MigrationRunner = migrator;
         await migrator.ApplyAsync(RepoPaths.Combine("db", "migrations"), CancellationToken.None);
 
         await ApplyFixtureScriptAsync(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "testfixture.sql"));

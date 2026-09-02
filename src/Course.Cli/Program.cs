@@ -25,6 +25,12 @@ try
                 new PostgresActionPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 new JsonSchemaValidator(),
                 ManifestSchema.Load(),
+                // Baked in by the Dockerfile (COPY db/migrations ->
+                // /app/migrations, COPY db/manifests -> /app/manifests), since
+                // the bootstrap service runs unattended with no operator to
+                // pass directory arguments.
+                migrationsDirectory: "/app/migrations",
+                manifestsDirectory: "/app/manifests",
                 CancellationToken.None);
             break;
         case "action validate":
