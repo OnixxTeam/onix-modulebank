@@ -77,9 +77,12 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         // TimeoutMs is likewise never read back out -- a caller that supplies
         // Manifest always supplies TimeoutOverride too (WorkerLoop's own
         // contract), which outranks it unconditionally a few lines down.
+        // Version comes from the manifest itself, never from explicitVersion
+        // (ticket 02): the two are supplied by the same caller and must agree,
+        // but only PrefetchedManifest.Version is a non-nullable guarantee.
         var manifest = callerContext?.Manifest is { } prefetched
             ? new RuntimeManifest(
-                Version: explicitVersion!.Value,
+                Version: prefetched.Version,
                 IdempotencyMode: "not_required",
                 RequiredPolicy: prefetched.RequiredPolicy,
                 RequestSchema: prefetched.RequestSchema,
