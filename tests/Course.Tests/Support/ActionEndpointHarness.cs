@@ -33,8 +33,8 @@ internal static class ActionEndpointHarness
 
         responseBody.Seek(0, SeekOrigin.Begin);
         var text = await new StreamReader(responseBody).ReadToEndAsync();
-        return new HarnessResult(context.Response.StatusCode, text);
+        return new HarnessResult(context.Response.StatusCode, text, context);
     }
 }
 
-internal sealed record HarnessResult(int StatusCode, string Body);
+internal sealed record HarnessResult(int StatusCode, string Body, HttpContext Context);

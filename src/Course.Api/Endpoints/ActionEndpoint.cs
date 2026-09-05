@@ -16,6 +16,17 @@ namespace Course.Api.Endpoints;
 // parsing, auth, envelope writing) -- everything transactional is IActionExecutor's.
 public static partial class ActionEndpoint
 {
+    // Generous relative to any published payload (the smallest legacy-callback
+    // limit in the system, the adapter's, is 64 KiB for a single external field
+    // set) but still an explicit, enforced ceiling now that the whole body is
+    // read into memory rather than streamed.
+    private const int MaxBodyBytes = 1_048_576;
+
+    // Stashed for week 3's signature boundary (ticket 07), which verifies HMAC
+    // over these exact bytes -- re-reading the body there is not an option,
+    // since ASP.NET Core request streams are forward-only by default.
+    public const string RawBodyItemKey = "trusted.rawBody";
+
     public static async Task HandleAsync(
         HttpContext httpContext, IActionExecutor executor, IJwtAuthenticator jwtFactory, ILogger<ActionEndpointLog> logger)
     {
@@ -59,10 +70,41 @@ public static partial class ActionEndpoint
             explicitVersion = parsedVersion;
         }
 
+        byte[] bodyBytes;
+        await using (var buffer = new MemoryStream())
+        {
+            var readBuffer = new byte[81_920];
+            var totalRead = 0;
+            int read;
+            var tooLarge = false;
+            while ((read = await httpContext.Request.Body.ReadAsync(readBuffer, cancellationToken)) > 0)
+            {
+                totalRead += read;
+                if (totalRead > MaxBodyBytes)
+                {
+                    tooLarge = true;
+                    break;
+                }
+
+                buffer.Write(readBuffer, 0, read);
+            }
+
+            if (tooLarge)
+            {
+                await ActionEnvelopeWriter.WriteErrorAsync(
+                    httpContext, ActionError.RequestTooLarge(MaxBodyBytes), correlationId, null);
+                return;
+            }
+
+            bodyBytes = buffer.ToArray();
+        }
+
+        httpContext.Items[RawBodyItemKey] = bodyBytes;
+
         JsonNode? payload;
         try
         {
-            payload = await JsonNode.ParseAsync(httpContext.Request.Body, cancellationToken: cancellationToken);
+            payload = JsonNode.Parse(bodyBytes);
         }
         catch (JsonException)
         {
