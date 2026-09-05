@@ -73,6 +73,10 @@ public sealed class PostgresFixture : IAsyncLifetime
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.get.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "workflow.get.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "workflow.probe.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.validate.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.check_limit.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.approve.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.reject.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
         await PublishAndActivateAsync(TestManifests.EchoContext());

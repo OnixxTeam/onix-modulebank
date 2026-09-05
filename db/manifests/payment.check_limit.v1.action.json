@@ -1,0 +1,60 @@
+{
+  "contract_version": "course-1",
+  "module": "payment",
+  "action": "check_limit",
+  "version": 1,
+  "http_method": "POST",
+  "target_schema": "payment",
+  "target_function": "check_limit_v1",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:payment-check-limit-payload",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId"
+    ],
+    "properties": {
+      "operationId": {
+        "type": "string",
+        "format": "uuid"
+      }
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:payment-check-limit-response",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId",
+      "amount",
+      "ruleVersion"
+    ],
+    "properties": {
+      "operationId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "amount": {
+        "type": "string",
+        "pattern": "^(?:0\\.0[1-9]|0\\.[1-9][0-9]?|[1-9][0-9]{0,15}(?:\\.[0-9]{1,2})?)$"
+      },
+      "ruleVersion": {
+        "const": "course-limit-v1"
+      }
+    }
+  },
+  "outcomes": [
+    "WITHIN_LIMIT",
+    "REVIEW_REQUIRED"
+  ],
+  "required_policy": [
+    "workflow:execute"
+  ],
+  "idempotency_mode": "required",
+  "idempotency_scope": "principal_action",
+  "timeout_ms": 5000,
+  "enabled": true,
+  "is_default": true
+}
