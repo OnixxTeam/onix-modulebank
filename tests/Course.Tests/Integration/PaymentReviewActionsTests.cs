@@ -136,7 +136,7 @@ public sealed class PaymentReviewActionsTests
     {
         var operationId = await InsertOperationAsync("50000.00");
         using var client = factory.CreateClient();
-        var token = ApiFactory.CreateToken("workflow-worker-test", "internal", "workflow:execute");
+        var token = ApiFactory.CreateToken("workflow-worker-test", "internal", "payment:internal");
 
         var response = await client.PostActionAsync(
             "/api/payment/check_limit",
@@ -194,7 +194,7 @@ public sealed class PaymentReviewActionsTests
           "module": "payment",
           "action": "validate",
           "action_version": 1,
-          "required_policy": ["workflow:execute"],
+          "required_policy": ["payment:internal"],
           "timeout_ms": 5000,
           "retry": {"max_attempts": 1, "delays_ms": []},
           "input_mapping": {{inputMapping}},
@@ -207,7 +207,7 @@ public sealed class PaymentReviewActionsTests
           "module": "payment",
           "action": "check_limit",
           "action_version": 1,
-          "required_policy": ["workflow:execute"],
+          "required_policy": ["payment:internal"],
           "timeout_ms": 5000,
           "retry": {"max_attempts": 1, "delays_ms": []},
           "input_mapping": {"/operationId": "/operationId"},
@@ -220,7 +220,7 @@ public sealed class PaymentReviewActionsTests
           "module": "payment",
           "action": "approve",
           "action_version": 1,
-          "required_policy": ["workflow:execute"],
+          "required_policy": ["payment:internal"],
           "timeout_ms": 5000,
           "retry": {"max_attempts": 1, "delays_ms": []},
           "input_mapping": {"/operationId": "/operationId"},
@@ -233,7 +233,7 @@ public sealed class PaymentReviewActionsTests
           "module": "payment",
           "action": "reject",
           "action_version": 1,
-          "required_policy": ["workflow:execute"],
+          "required_policy": ["payment:internal"],
           "timeout_ms": 5000,
           "retry": {"max_attempts": 1, "delays_ms": []},
           "input_mapping": {{inputMapping}},
