@@ -71,7 +71,7 @@
     "APPROVED"
   ],
   "required_policy": [
-    "workflow:execute"
+    "payment:internal"
   ],
   "idempotency_mode": "required",
   "idempotency_scope": "principal_action",
