@@ -32,6 +32,9 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
 
     public static ActionError RequestInvalid(string message) => new(400, "request.invalid", message);
 
+    public static ActionError RequestTooLarge(int maxBytes) =>
+        new(413, "request.too_large", $"request body exceeds {maxBytes} bytes");
+
     public static ActionError IdempotencyRequired() =>
         new(400, "idempotency.required", "Idempotency-Key header is required for this action");
 
