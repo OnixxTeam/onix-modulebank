@@ -15,12 +15,17 @@ public sealed record VerifiedClaims(string Principal, string Consumer, IReadOnly
 // context shape as before. ExecutionId is the subject-effect idempotency key --
 // target functions read it under this name.
 //
-// SignatureVersion exists only for the network path (ticket 07): non-null
-// exactly when ActionEndpoint's ISignatureVerifier verified an
-// X-Provider-Signature header over the exact request bytes. It serializes into
-// api.invoke's context as nested transport.signatureVerified/signatureVersion,
-// the same "only when set" mechanism the worker fields already use, so a
-// target that never looks for it sees no shape change at all.
+// SignatureVersion/SignatureBodyHashHex exist only for the network path
+// (ticket 07): both non-null exactly when ActionEndpoint's ISignatureVerifier
+// verified an X-Provider-Signature header over the exact request bytes.
+// SignatureVersion serializes into api.invoke's context as nested
+// transport.signatureVerified/signatureVersion (SPEC fixes that object at
+// exactly those two fields); SignatureBodyHashHex serializes as a sibling
+// top-level rawBodyHash, not a third transport field, so a signed action that
+// needs "the hash of the exact bytes the signature covered" (ticket 08's
+// receipt.accept) never has to re-derive it from a reserialized payload. Both
+// use the same "only when set" mechanism the worker fields already use, so a
+// target that never looks for either sees no shape change at all.
 public sealed record TrustedContext(
     string Principal,
     string Consumer,
@@ -32,4 +37,5 @@ public sealed record TrustedContext(
     Guid? JobId = null,
     string? ExecutionId = null,
     Guid? AttemptId = null,
-    int? SignatureVersion = null);
+    int? SignatureVersion = null,
+    string? SignatureBodyHashHex = null);

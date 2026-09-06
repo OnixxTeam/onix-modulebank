@@ -62,6 +62,7 @@ public sealed partial class ProviderSignatureVerifier(byte[] secret) : ISignatur
             return SignatureVerificationResult.Invalid();
         }
 
-        return SignatureVerificationResult.Verified(version);
+        var bodyHashHex = Convert.ToHexStringLower(SHA256.HashData(bodyBytes));
+        return SignatureVerificationResult.Verified(version, bodyHashHex);
     }
 }

@@ -23,7 +23,14 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         ["idempotency.conflict"] = 409,
         ["workflow.decision_conflict"] = 409,
         ["signature.invalid"] = 401,
+        // These two are receipt.accept_v1's own business codes (ticket 08), not
+        // runtime ones -- but their contract-fixed statuses (403, 422) don't
+        // match what the generic business-code fallback below would derive
+        // (400, since neither code's last segment is literally "not_found"),
+        // so they need an explicit entry same as payload.invalid already has.
+        ["receipt.signature_required"] = 403,
         ["payload.invalid"] = 422,
+        ["receipt.external_request_not_found"] = 422,
         ["dependency.unavailable"] = 503,
         ["action.contract_violation"] = 500,
         ["action.timeout"] = 504,

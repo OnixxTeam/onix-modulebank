@@ -19,7 +19,8 @@ public interface IActionExecutor
         string? requestId,
         JsonNode payload,
         CancellationToken cancellationToken,
-        int? signatureVersion = null);
+        int? signatureVersion = null,
+        string? signatureBodyHashHex = null);
 }
 
 public sealed record ActionExecutionResult(

@@ -141,7 +141,7 @@ public static partial class ActionEndpoint
         var stopwatch = Stopwatch.StartNew();
         var result = await executor.ExecuteAsync(
             module, action, explicitVersion, authResult.Claims!, correlationId, requestId, payload, cancellationToken,
-            signatureResult.Version);
+            signatureResult.Version, signatureResult.BodyHashHex);
         stopwatch.Stop();
 
         // Whitelisted fields only (spec §5, "Логи"): never the token, the payload

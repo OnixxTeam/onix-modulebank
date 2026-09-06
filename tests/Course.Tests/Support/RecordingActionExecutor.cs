@@ -22,6 +22,8 @@ internal sealed class RecordingActionExecutor : IActionExecutor
 
     public int? SignatureVersion { get; private set; }
 
+    public string? SignatureBodyHashHex { get; private set; }
+
     public Task<ActionExecutionResult> ExecuteAsync(
         string moduleName,
         string actionName,
@@ -31,7 +33,8 @@ internal sealed class RecordingActionExecutor : IActionExecutor
         string? requestId,
         JsonNode payload,
         CancellationToken cancellationToken,
-        int? signatureVersion = null)
+        int? signatureVersion = null,
+        string? signatureBodyHashHex = null)
     {
         CallCount++;
         ExplicitVersion = explicitVersion;
@@ -39,6 +42,7 @@ internal sealed class RecordingActionExecutor : IActionExecutor
         CorrelationId = correlationId;
         RequestId = requestId;
         SignatureVersion = signatureVersion;
+        SignatureBodyHashHex = signatureBodyHashHex;
 
         return Task.FromResult(ActionExecutionResult.Success(1, "CREATED", new JsonObject()));
     }
