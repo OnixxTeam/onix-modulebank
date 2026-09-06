@@ -27,14 +27,15 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         string? requestId,
         JsonNode payload,
         CancellationToken cancellationToken,
-        int? signatureVersion = null)
+        int? signatureVersion = null,
+        string? signatureBodyHashHex = null)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         var outcome = await ExecuteInTransactionAsync(
             connection, transaction, moduleName, actionName, explicitVersion, claims, correlationId, requestId, payload,
-            callerContext: null, cancellationToken, signatureVersion);
+            callerContext: null, cancellationToken, signatureVersion, signatureBodyHashHex);
 
         if (outcome.Result.IsSuccess || outcome.TargetReturnedError)
         {
@@ -61,7 +62,8 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         JsonNode payload,
         ActionCallerContext? callerContext,
         CancellationToken cancellationToken,
-        int? signatureVersion = null)
+        int? signatureVersion = null,
+        string? signatureBodyHashHex = null)
     {
         // Every early exit here is a rejection before (or instead of) invoking the
         // target, so the transaction owner must never commit it -- only the
@@ -132,7 +134,8 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             callerContext?.JobId,
             callerContext?.ExecutionId,
             callerContext?.AttemptId,
-            signatureVersion);
+            signatureVersion,
+            signatureBodyHashHex);
 
         // Pass the version the manifest actually resolved to, not the caller's original
         // (possibly null/default) request -- so invoke can never resolve a different
@@ -266,6 +269,18 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
                 ["signatureVerified"] = true,
                 ["signatureVersion"] = signatureVersion,
             };
+        }
+
+        // A sibling of transport, not a third field inside it (SPEC's own
+        // "только два маркера" for a verified signature stays literally true).
+        // Co-occurs with transport always (both come from the same verified
+        // signature), so a target that already requires transport.signatureVerified
+        // (ticket 08's receipt.accept) can rely on this being present too --
+        // the exact SHA-256 of the same bytes the HMAC ran over, never a hash
+        // of the parsed-and-reserialized payload.
+        if (context.SignatureBodyHashHex is { } signatureBodyHashHex)
+        {
+            contextJson["rawBodyHash"] = signatureBodyHashHex;
         }
 
         var envelope = await ExecuteScalarJsonAsync(

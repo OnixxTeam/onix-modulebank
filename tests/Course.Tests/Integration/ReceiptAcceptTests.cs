@@ -201,6 +201,39 @@ public sealed class ReceiptAcceptTests
         Assert.Equal(1, inboxCount);
     }
 
+    // Ticket 08's own pitfall, guarded end to end: body_hash must come from
+    // the exact wire bytes (ticket 07's context.rawBodyHash), never from
+    // Postgres re-rendering the parsed payload as text -- the latter would
+    // normalise key order and treat these two differently-formatted-but-
+    // same-fields bodies as identical content, silently deduping a case the
+    // contract requires to be told apart.
+    [Fact]
+    public async Task SameMessageIdSameFields_DifferentByteOrdering_IsAGenuineConflictNotADuplicate()
+    {
+        var (client, externalRequestId, _) = await PrepareExternalRequestAsync("1000.00");
+        var messageId = $"provider-{Guid.NewGuid():N}";
+        var canonicalBody = ReceiptBody(externalRequestId, messageId);
+        var reorderedBody = new JsonObject
+        {
+            ["version"] = 1,
+            ["providerPaymentId"] = messageId,
+            ["outcome"] = "COMPLETED",
+            ["occurredAt"] = "2026-09-04T12:00:00Z",
+            ["messageId"] = messageId,
+            ["externalRequestId"] = externalRequestId,
+        }.ToJsonString();
+        Assert.NotEqual(canonicalBody, reorderedBody);
+
+        var first = await PostSignedReceiptAsync(client, canonicalBody, $"receipt-{Guid.NewGuid():N}");
+        Assert.Equal(200, first.StatusCode);
+        Assert.Equal("RECEIVED", first.Body["outcome"]!.GetValue<string>());
+
+        var second = await PostSignedReceiptAsync(client, reorderedBody, $"receipt-{Guid.NewGuid():N}");
+
+        Assert.Equal(409, second.StatusCode);
+        Assert.Equal("idempotency.conflict", second.Body["code"]!.GetValue<string>());
+    }
+
     private static async Task<ActionResponse> PostSignedReceiptAsync(HttpClient client, string body, string idempotencyKey)
     {
         var header = ProviderSignature.Header(ApiFactory.ProviderHmacSecret, Encoding.UTF8.GetBytes(body));

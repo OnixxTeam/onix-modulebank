@@ -62,10 +62,18 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_signature_verified boolean;
-  v_message_id         text := p_payload ->> 'messageId';
+  v_signature_verified  boolean;
+  v_message_id          text := p_payload ->> 'messageId';
   v_external_request_id text := p_payload ->> 'externalRequestId';
-  v_body_hash           text := pg_catalog.encode(pg_catalog.sha256(p_payload::text::pg_catalog.bytea), 'hex');
+  -- The exact SHA-256 of the exact HTTP body bytes, stamped by the signature
+  -- boundary itself (ticket 07's context.rawBodyHash) -- never
+  -- sha256(p_payload::text), which would hash Postgres's own jsonb-to-text
+  -- rendering of the *parsed* payload instead of what actually crossed the
+  -- wire. This is the same source of bytes the HMAC verified (SPEC "Хеш тела
+  -- считается по тем же байтам, что и подпись"): two different sources here
+  -- would only diverge on a byte-identical-content-but-differently-ordered
+  -- resubmission, exactly the case a dedup-by-hash column exists to catch.
+  v_body_hash           text := p_context ->> 'rawBodyHash';
   v_external_request    core.external_requests%rowtype;
   v_existing            delivery.inbox%rowtype;
 begin

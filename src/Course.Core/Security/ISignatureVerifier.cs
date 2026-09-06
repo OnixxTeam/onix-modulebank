@@ -16,11 +16,17 @@ public interface ISignatureVerifier
 // the one fact ActionEndpoint needs to decide whether to stamp trusted-context
 // markers at all. Absent header is not an error (most actions never sign
 // anything); a present-but-wrong header always is.
-public sealed record SignatureVerificationResult(int? Version, ActionError? Error)
+//
+// BodyHashHex is a plain SHA-256 of the exact same bytes the HMAC ran over,
+// computed here rather than separately by the caller: a target that needs to
+// store "the hash of the exact body" (ticket 08's receipt.accept) must get it
+// from the one place that actually held the raw bytes, never by re-hashing a
+// parsed-and-reserialized JsonNode -- the ticket's own most-common mistake.
+public sealed record SignatureVerificationResult(int? Version, string? BodyHashHex, ActionError? Error)
 {
-    public static SignatureVerificationResult NotPresent { get; } = new(null, null);
+    public static SignatureVerificationResult NotPresent { get; } = new(null, null, null);
 
-    public static SignatureVerificationResult Verified(int version) => new(version, null);
+    public static SignatureVerificationResult Verified(int version, string bodyHashHex) => new(version, bodyHashHex, null);
 
-    public static SignatureVerificationResult Invalid() => new(null, ActionError.SignatureInvalid());
+    public static SignatureVerificationResult Invalid() => new(null, null, ActionError.SignatureInvalid());
 }
