@@ -6,10 +6,13 @@ requires-python = ">=3.12"
 dependencies = [
   "psycopg[binary]>=3.2,<4",
   "httpx>=0.27,<1",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
 ]
 
 [project.scripts]
 outbox-dispatcher = "perimeter.dispatcher:main"
+receipt-adapter = "perimeter.adapter:main"
 
 [build-system]
 requires = ["hatchling"]

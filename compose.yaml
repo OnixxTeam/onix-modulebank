@@ -106,10 +106,13 @@ services:
   provider-simulator:
     image: ghcr.io/fintech-dev-lab/internship-provider-simulator@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
     environment:
-      # receipt-adapter (ticket 12) doesn't exist yet -- callbacks fail to
-      # connect until then, which does not affect this ticket's own scope
-      # (outbox-dispatcher never reads a callback).
-      CALLBACK_URL: http://receipt-adapter:8082/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY:-local-dev-capability}
+      # No compose-level default here: PROVIDER_CALLBACK_CAPABILITY is one of
+      # the three variables configuration.md's own table marks
+      # "Default в tracked Compose: Нет" (unlike PROVIDER_URL/OUTBOX_OWNER,
+      # which the table explicitly allows a default for) -- a working local
+      # value lives in .env.example instead, loaded from `.env`, never
+      # baked into this tracked file.
+      CALLBACK_URL: http://receipt-adapter:8082/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY}
       AUDIT_TOKEN: ${PROVIDER_AUDIT_TOKEN:-}
       # SIMULATOR_MODE/CALLBACK_DELAY/CALLBACK_TIMEOUT/CALLBACK_MAX_ATTEMPTS/
       # CALLBACK_RETRY_DELAY are deliberately absent, not set to an empty
@@ -119,12 +122,13 @@ services:
       # running the pinned image directly. The checker supplies its own
       # real values per scenario when it wants anything else.
 
-
   # One locally built image, three entrypoints (SPEC "Три Python-сервиса
-  # запускаются разными entrypoints одного локально собранного image") --
-  # this ticket wires only the one that exists so far. No host port; the
-  # dispatcher never reads physical tables, only delivery.claim_outbox/
-  # succeed_outbox/fail_outbox under its own least-privilege role (ticket 09).
+  # запускаются разными entrypoints одного локально собранного image"). Only
+  # this service declares `build:` -- receipt-adapter below just references
+  # the same `perimeter:local` tag, same pattern as worker-a/worker-b sharing
+  # `workflow-worker:local`. No host port; the dispatcher never reads
+  # physical tables, only delivery.claim_outbox/succeed_outbox/fail_outbox
+  # under its own least-privilege role (ticket 09).
   outbox-dispatcher:
     build: {context: ./python}
     image: perimeter:local
@@ -142,6 +146,32 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       provider-simulator: {condition: service_started}
+
+  # Ticket 12: the anti-corruption layer. No PGHOST/PGUSER/... entry at all --
+  # this process has no PostgreSQL credentials in any form (SPEC/acceptance:
+  # "У процесса нет учётных данных к PostgreSQL ни в каком виде"), and no
+  # host port either, matching every other Python service.
+  #
+  # PROVIDER_CALLBACK_CAPABILITY/PROVIDER_CALLBACK_TOKEN carry no compose-level
+  # default on purpose -- configuration.md's table marks both
+  # "Default в tracked Compose: Нет" (04-week-3.md: "Synthetic JWT/HMAC/
+  # capability values передаются только через environment проверочного
+  # запуска и не имеют default в tracked Compose"), unlike PROVIDER_HMAC_SECRET
+  # just above (an existing ticket-07 default, not this ticket's to remove).
+  # A missing value here means the adapter fails fast on start (ticket 12
+  # acceptance), exactly as required; local dev values live only in
+  # .env.example, loaded from an untracked `.env`, never in this file.
+  receipt-adapter:
+    image: perimeter:local
+    command: ["receipt-adapter"]
+    environment:
+      PROVIDER_CALLBACK_CAPABILITY: ${PROVIDER_CALLBACK_CAPABILITY}
+      PROVIDER_CALLBACK_TOKEN: ${PROVIDER_CALLBACK_TOKEN}
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET:-dev-insecure-hmac-secret-not-for-production}
+      RECEIPT_API_URL: ${RECEIPT_API_URL:-http://gateway:8080/api/receipt/accept}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      gateway: {condition: service_started}
 
 volumes:
   pgdata:

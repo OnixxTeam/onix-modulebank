@@ -29,6 +29,16 @@ REQUIRED_VARS = (
     "OUTBOX_OWNER",
 )
 
+# The adapter deliberately has no PGHOST/PGUSER/... entry here at all -- it
+# has no PostgreSQL credentials in any form (SPEC/ticket 12 acceptance), so
+# there is nothing libpq-shaped to validate.
+ADAPTER_REQUIRED_VARS = (
+    "PROVIDER_CALLBACK_CAPABILITY",
+    "PROVIDER_CALLBACK_TOKEN",
+    "PROVIDER_HMAC_SECRET",
+    "RECEIPT_API_URL",
+)
+
 
 class MissingConfigError(RuntimeError):
     """Raised when a required environment variable is absent."""
@@ -63,4 +73,30 @@ def load_dispatcher_config(env: dict[str, str] | None = None) -> DispatcherConfi
         owner=env["OUTBOX_OWNER"],
         poll_interval_seconds=0.2 if test_profile else 2.0,
         claim_limit=5,
+    )
+
+
+@dataclass(frozen=True)
+class AdapterConfig:
+    capability: str
+    callback_token: str
+    hmac_secret: bytes
+    receipt_api_url: str
+
+
+def load_adapter_config(env: dict[str, str] | None = None) -> AdapterConfig:
+    env = os.environ if env is None else env
+
+    missing = [name for name in ADAPTER_REQUIRED_VARS if not env.get(name)]
+    if missing:
+        raise MissingConfigError(missing)
+
+    return AdapterConfig(
+        capability=env["PROVIDER_CALLBACK_CAPABILITY"],
+        callback_token=env["PROVIDER_CALLBACK_TOKEN"],
+        # Raw bytes of exactly the string value -- no trim/base64/hex decoding
+        # (spec.md, quoted above the module docstring for the dispatcher's
+        # own equally-literal PGUSER/PGAPPNAME rule).
+        hmac_secret=env["PROVIDER_HMAC_SECRET"].encode("utf-8"),
+        receipt_api_url=env["RECEIPT_API_URL"].rstrip("/"),
     )
