@@ -1,9 +1,11 @@
-"""The dispatcher's whole database surface: three functions, nothing else.
+"""The dispatcher's and reconciler's whole database surface: four functions,
+nothing else.
 
 Every call goes through ``delivery.claim_outbox``/``succeed_outbox``/
-``fail_outbox`` (ticket 09) via the ``outbox_dispatcher`` role's own
-connection -- no physical table is ever read or written here, matching the
-role's own EXECUTE-only grants.
+``fail_outbox``/``reconcile_inbox`` (ticket 09) via each role's own
+connection -- no physical table is ever read or written here, matching both
+roles' own EXECUTE-only grants. The dispatcher only calls the first three;
+the reconciler only calls the fourth.
 """
 
 from __future__ import annotations
@@ -59,3 +61,11 @@ def fail_outbox(conn: psycopg.Connection, outbox_id: str, owner: str, lease_vers
             "select delivery.fail_outbox(%s, %s, %s, %s)",
             (outbox_id, owner, lease_version, error_code),
         )
+
+
+def reconcile_inbox(conn: psycopg.Connection, limit: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute("select delivery.reconcile_inbox(%s)", (limit,))
+        (applied,) = cur.fetchone()
+
+    return applied

@@ -1,3 +1,5 @@
+using Course.Cli;
+using Course.Cli.Commands;
 using Course.Tests.Support;
 using Workflow.Core.Catalog;
 using Workflow.Core.Maps;
@@ -67,6 +69,43 @@ public sealed class FlowValidateFixtureTests
         Assert.False(result.IsValid, $"{Path.GetFileName(path)} was expected to be rejected");
         Assert.NotEmpty(result.Violations);
         Assert.All(result.Violations, v => Assert.False(string.IsNullOrWhiteSpace(v.Code)));
+    }
+
+    // Ticket 13 acceptance: after a clean boot, "опубликованные и активированные
+    // карты" must already be true with no manual host command. Runs the real
+    // BootstrapCommand.ExecuteAsync -- same schema-validator instances as the
+    // fixture tests above, reused for the same $id-registry reason -- against
+    // an empty manifests directory (this test only cares about the flow-map
+    // half of bootstrap; PostgresFixture's own setup already published every
+    // real manifest with a matching checksum, so re-running that half here
+    // would just be redundant, not wrong).
+    [Fact]
+    public async Task Bootstrap_WithFlowMapsDirectory_PublishesAndActivatesTheProductionPaymentFlows()
+    {
+        var emptyManifestsDirectory = Directory.CreateTempSubdirectory("bootstrap-flow-activation-tests-").FullName;
+
+        var envelope = await BootstrapCommand.ExecuteAsync(
+            factory.Postgres.MigrationRunner,
+            factory.Postgres.Publisher,
+            new Course.Infrastructure.Validation.JsonSchemaValidator(),
+            ManifestSchema.Load(),
+            RepoPaths.Combine("db", "migrations"),
+            emptyManifestsDirectory,
+            CancellationToken.None,
+            flowMapValidator: BuildValidator(),
+            flowPublisher: factory.Postgres.FlowPublisher,
+            flowMapsDirectory: RepoPaths.Combine("db", "maps"));
+
+        Assert.Equal("ok", envelope.Status);
+
+        var flows = await factory.Postgres.FlowPublisher.ListAsync(CancellationToken.None);
+        var activeFlowNames = flows!.AsArray()
+            .Where(entry => entry!["isActive"]!.GetValue<bool>())
+            .Select(entry => entry!["flowName"]!.GetValue<string>())
+            .ToHashSet();
+
+        Assert.Contains("payment-processing", activeFlowNames);
+        Assert.Contains("payment-review", activeFlowNames);
     }
 
     private WorkflowMapValidator BuildValidator() =>

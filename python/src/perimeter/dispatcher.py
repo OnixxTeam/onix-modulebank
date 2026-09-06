@@ -10,10 +10,8 @@ classified error code and lets PostgreSQL decide the rest.
 from __future__ import annotations
 
 import logging
-import signal
 import sys
 import time
-from types import FrameType
 
 import httpx
 import psycopg
@@ -22,17 +20,11 @@ from perimeter import db
 from perimeter.classify import ClassificationResult, Retry, Success, Terminal, classify_http_response, classify_transport_failure
 from perimeter.config import DispatcherConfig, MissingConfigError, load_dispatcher_config
 from perimeter.request import build_provider_request
+from perimeter.runloop import ShutdownFlag
 
 logger = logging.getLogger("perimeter.dispatcher")
 
 _HTTP_TIMEOUT_SECONDS = 10.0
-
-_shutdown_requested = False
-
-
-def _handle_shutdown(signum: int, frame: FrameType | None) -> None:
-    global _shutdown_requested
-    _shutdown_requested = True
 
 
 def attempt_delivery(client: httpx.Client, config: DispatcherConfig, delivery: db.ClaimedDelivery) -> ClassificationResult:
@@ -68,11 +60,11 @@ def process_claim(conn: psycopg.Connection, client: httpx.Client, config: Dispat
 
 
 def run(config: DispatcherConfig) -> None:
-    signal.signal(signal.SIGTERM, _handle_shutdown)
-    signal.signal(signal.SIGINT, _handle_shutdown)
+    shutdown = ShutdownFlag()
+    shutdown.install()
 
     with psycopg.connect(autocommit=True) as conn, httpx.Client(follow_redirects=False) as client:
-        while not _shutdown_requested:
+        while not shutdown.requested:
             claims = db.claim_outbox(conn, config.owner, config.claim_limit)
 
             if not claims:
@@ -80,7 +72,7 @@ def run(config: DispatcherConfig) -> None:
                 continue
 
             for delivery in claims:
-                if _shutdown_requested:
+                if shutdown.requested:
                     return
                 process_claim(conn, client, config, delivery)
 
