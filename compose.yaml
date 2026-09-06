@@ -22,6 +22,8 @@ services:
       COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
       COURSE_RUNTIME_PASSWORD: ${COURSE_RUNTIME_PASSWORD:-runtime}
       WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      COURSE_OUTBOX_PASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      COURSE_INBOX_PASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
