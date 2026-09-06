@@ -46,6 +46,11 @@ services:
       COURSE_JWT_AUDIENCE: moduledev-api
       COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
       COURSE_RUNTIME_DSN: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=${COURSE_RUNTIME_PASSWORD:-runtime}
+      # Ticket 07: the generic signature boundary's HMAC key. Named exactly
+      # PROVIDER_HMAC_SECRET (SPEC/checker fixture), shared with receipt-adapter
+      # once ticket 12 builds it -- both sides must sign/verify with the same
+      # bytes. No tracked default of real value; the checker always replaces it.
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET:-dev-insecure-hmac-secret-not-for-production}
     # Not depends_on: cli -- week 2's open checker builds and starts only the
     # six services TASK.md actually requires (this one plus cli, gateway,
     # postgres, worker-a, worker-b), scoped by name, so a hard dependency on

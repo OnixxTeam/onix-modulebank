@@ -28,7 +28,8 @@ public static partial class ActionEndpoint
     public const string RawBodyItemKey = "trusted.rawBody";
 
     public static async Task HandleAsync(
-        HttpContext httpContext, IActionExecutor executor, IJwtAuthenticator jwtFactory, ILogger<ActionEndpointLog> logger)
+        HttpContext httpContext, IActionExecutor executor, IJwtAuthenticator jwtFactory, ISignatureVerifier signatureVerifier,
+        ILogger<ActionEndpointLog> logger)
     {
         var cancellationToken = httpContext.RequestAborted;
 
@@ -101,6 +102,21 @@ public static partial class ActionEndpoint
 
         httpContext.Items[RawBodyItemKey] = bodyBytes;
 
+        // Over the exact bytes just captured, before JSON is ever parsed from
+        // them (SPEC "Тело читается один раз в массив байтов, HMAC считается
+        // над ним, JSON разбирается из тех же байтов"). Absent header is not
+        // a failure -- most actions never sign anything -- but a present,
+        // wrong one always is, and the target is never reached to find out.
+        var signatureHeader = httpContext.Request.Headers.TryGetValue("X-Provider-Signature", out var signatureValue)
+            ? signatureValue.ToString()
+            : null;
+        var signatureResult = signatureVerifier.Verify(signatureHeader, bodyBytes);
+        if (signatureResult.Error is not null)
+        {
+            await ActionEnvelopeWriter.WriteErrorAsync(httpContext, signatureResult.Error, correlationId, null);
+            return;
+        }
+
         JsonNode? payload;
         try
         {
@@ -124,7 +140,8 @@ public static partial class ActionEndpoint
 
         var stopwatch = Stopwatch.StartNew();
         var result = await executor.ExecuteAsync(
-            module, action, explicitVersion, authResult.Claims!, correlationId, requestId, payload, cancellationToken);
+            module, action, explicitVersion, authResult.Claims!, correlationId, requestId, payload, cancellationToken,
+            signatureResult.Version);
         stopwatch.Stop();
 
         // Whitelisted fields only (spec §5, "Логи"): never the token, the payload
