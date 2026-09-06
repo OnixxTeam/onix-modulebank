@@ -82,6 +82,9 @@ public sealed class PostgresFixture : IAsyncLifetime
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.submit.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.events.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "workflow.manual.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.prepare_external.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.apply_receipt.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.complete.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
         await PublishAndActivateAsync(TestManifests.EchoContext());
@@ -94,6 +97,13 @@ public sealed class PostgresFixture : IAsyncLifetime
         // per-action fixtures, this is the actual file src/Course.Cli/Dockerfile
         // bakes into the image, under its real production flow_name).
         await PublishAndActivateFlowAsync(RepoPaths.Combine("db", "maps", "payment-review-v1.flow.yaml"));
+
+        // The given payment-processing card, published and activated exactly
+        // once for the run -- same reasoning as payment-review above. Ticket
+        // 06's own tests only ever drive PAYMENT_EXECUTION operations up to
+        // WAITING_SIGNAL; apply_receipt/complete stay unreached stubs until
+        // ticket 10.
+        await PublishAndActivateFlowAsync(RepoPaths.Combine("db", "maps", "payment-processing-v1.flow.yaml"));
     }
 
     public async Task DisposeAsync() => await container.DisposeAsync();

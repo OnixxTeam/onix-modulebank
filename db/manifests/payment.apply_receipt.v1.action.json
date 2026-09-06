@@ -1,0 +1,70 @@
+{
+  "contract_version": "course-1",
+  "module": "payment",
+  "action": "apply_receipt",
+  "version": 1,
+  "http_method": "POST",
+  "target_schema": "payment",
+  "target_function": "apply_receipt_v1",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:payment-apply-receipt-payload",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId"
+    ],
+    "properties": {
+      "operationId": {
+        "type": "string",
+        "format": "uuid"
+      }
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:payment-apply-receipt-response",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId",
+      "externalRequestId",
+      "messageId",
+      "outcome"
+    ],
+    "properties": {
+      "operationId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "externalRequestId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "messageId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "outcome": {
+        "enum": [
+          "COMPLETED",
+          "REJECTED"
+        ]
+      }
+    }
+  },
+  "outcomes": [
+    "COMPLETED",
+    "REJECTED"
+  ],
+  "required_policy": [
+    "payment:internal"
+  ],
+  "idempotency_mode": "required",
+  "idempotency_scope": "principal_action",
+  "timeout_ms": 5000,
+  "enabled": true,
+  "is_default": true
+}
