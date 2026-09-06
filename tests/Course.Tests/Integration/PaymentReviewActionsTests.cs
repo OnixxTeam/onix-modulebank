@@ -161,14 +161,21 @@ public sealed class PaymentReviewActionsTests
             return JsonNode.Parse((string)(await command.ExecuteScalarAsync())!)!;
         });
 
+    // Ticket 04's operations_created_iff_no_process check requires a non-null
+    // process_id on any non-CREATED row; this fixture pins the operation
+    // directly to a throwaway flow (never the real payment-review one), so a
+    // freestanding random id satisfies the constraint without implying any
+    // relationship to workflow.process_instance -- the column carries no
+    // foreign key.
     private async Task<Guid> InsertOperationAsync(string amount) =>
         await factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
             await using var command = new NpgsqlCommand(
-                "insert into core.operations (request_id, operation_kind, amount, currency, status) "
-                + "values (@requestId, 'PAYMENT_APPROVAL', @amount, 'RUB', 'PROCESSING') returning operation_id",
+                "insert into core.operations (request_id, operation_kind, amount, currency, status, process_id) "
+                + "values (@requestId, 'PAYMENT_APPROVAL', @amount, 'RUB', 'PROCESSING', @processId) returning operation_id",
                 connection);
             command.Parameters.AddWithValue("requestId", $"req-{Guid.NewGuid():N}");
+            command.Parameters.AddWithValue("processId", Guid.NewGuid());
             command.Parameters.Add(new NpgsqlParameter("amount", NpgsqlDbType.Numeric)
             {
                 Value = decimal.Parse(amount, System.Globalization.CultureInfo.InvariantCulture),

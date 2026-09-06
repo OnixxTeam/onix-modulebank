@@ -21,6 +21,7 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         ["access.denied"] = 403,
         ["action.not_found"] = 404,
         ["idempotency.conflict"] = 409,
+        ["workflow.decision_conflict"] = 409,
         ["payload.invalid"] = 422,
         ["dependency.unavailable"] = 503,
         ["action.contract_violation"] = 500,

@@ -1,0 +1,53 @@
+{
+  "contract_version": "course-1",
+  "module": "operation",
+  "action": "events",
+  "version": 1,
+  "http_method": "POST",
+  "target_schema": "operation",
+  "target_function": "events_v1",
+  "request_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:operation-events-payload",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["operationId"],
+    "properties": {
+      "operationId": {"type": "string", "format": "uuid"}
+    }
+  },
+  "response_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:course:course-1:operation-events-response",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["operationId", "events"],
+    "properties": {
+      "operationId": {"type": "string", "format": "uuid"},
+      "events": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eventId", "eventType", "occurredAt"],
+          "properties": {
+            "eventId": {"type": "string", "format": "uuid"},
+            "eventType": {"type": "string", "minLength": 1, "maxLength": 64},
+            "occurredAt": {"type": "string"}
+          }
+        }
+      }
+    }
+  },
+  "outcomes": [
+    "FOUND"
+  ],
+  "required_policy": [
+    "payment:read"
+  ],
+  "idempotency_mode": "none",
+  "idempotency_scope": "none",
+  "timeout_ms": 5000,
+  "enabled": true,
+  "is_default": true
+}

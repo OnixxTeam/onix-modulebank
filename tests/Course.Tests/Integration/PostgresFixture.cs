@@ -5,6 +5,8 @@ using Course.Infrastructure.Postgres;
 using Course.Tests.Support;
 using Npgsql;
 using Testcontainers.PostgreSql;
+using Workflow.Core.Canonicalization;
+using Workflow.Core.Maps;
 using Workflow.Core.Publishing;
 using Workflow.Core.Runtime;
 
@@ -77,9 +79,21 @@ public sealed class PostgresFixture : IAsyncLifetime
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.check_limit.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.approve.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.reject.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.submit.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "operation.events.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "workflow.manual.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
         await PublishAndActivateAsync(TestManifests.EchoContext());
+
+        // The real payment-review card, published and activated exactly once
+        // for the whole test run -- publishing the same flow_name/version
+        // twice returns flow.conflict, so every test that submits a
+        // PAYMENT_APPROVAL operation shares this one activation rather than
+        // each standing up its own throwaway map (unlike PaymentReviewActionsTests'
+        // per-action fixtures, this is the actual file src/Course.Cli/Dockerfile
+        // bakes into the image, under its real production flow_name).
+        await PublishAndActivateFlowAsync(RepoPaths.Combine("db", "maps", "payment-review-v1.flow.yaml"));
     }
 
     public async Task DisposeAsync() => await container.DisposeAsync();
@@ -146,6 +160,25 @@ public sealed class PostgresFixture : IAsyncLifetime
         if (activateResult["status"]!.GetValue<string>() != "ok")
         {
             throw new InvalidOperationException($"failed to activate {manifest.Key}: {activateResult.ToJsonString()}");
+        }
+    }
+
+    private async Task PublishAndActivateFlowAsync(string mapPath)
+    {
+        var document = await MapLoader.LoadAsync(mapPath, CancellationToken.None);
+        var flowName = document["flow_name"]!.GetValue<string>();
+        var version = document["version"]!.GetValue<int>();
+
+        var published = await FlowPublisher.PublishAsync(document, JsonCanonicalizer.Sha256Hex(document), CancellationToken.None);
+        if (published["status"]!.GetValue<string>() != "ok")
+        {
+            throw new InvalidOperationException($"failed to publish {mapPath}: {published.ToJsonString()}");
+        }
+
+        var activated = await FlowPublisher.ActivateAsync(flowName, version, CancellationToken.None);
+        if (activated["status"]!.GetValue<string>() != "ok")
+        {
+            throw new InvalidOperationException($"failed to activate {mapPath}: {activated.ToJsonString()}");
         }
     }
 
