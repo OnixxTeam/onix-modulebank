@@ -18,6 +18,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     private const string Audience = "course-integration-tests-audience";
     private const string SigningKey = "integration-test-signing-key-at-least-32-bytes";
 
+    // Ticket 07: the generic signature boundary's HMAC key for this whole
+    // test run. Exposed so SignatureBoundaryTests (and any receipt.accept
+    // test from ticket 08 on) can sign a request body with the exact same
+    // bytes ProviderSignatureVerifier was constructed with.
+    public const string ProviderHmacSecret = "integration-test-provider-hmac-secret";
+
     public PostgresFixture Postgres { get; } = new();
 
     async Task IAsyncLifetime.InitializeAsync()
@@ -31,6 +37,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("COURSE_JWT_AUDIENCE", Audience);
         Environment.SetEnvironmentVariable("COURSE_JWT_SIGNING_KEY", SigningKey);
         Environment.SetEnvironmentVariable("COURSE_RUNTIME_DSN", Postgres.RuntimeConnectionString);
+        Environment.SetEnvironmentVariable("PROVIDER_HMAC_SECRET", ProviderHmacSecret);
 
         // Forces the host to build now instead of lazily on some test's first
         // HttpClient request, so a startup failure surfaces here, not inside an

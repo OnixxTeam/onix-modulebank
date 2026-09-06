@@ -26,14 +26,15 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         Guid correlationId,
         string? requestId,
         JsonNode payload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? signatureVersion = null)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         var outcome = await ExecuteInTransactionAsync(
             connection, transaction, moduleName, actionName, explicitVersion, claims, correlationId, requestId, payload,
-            callerContext: null, cancellationToken);
+            callerContext: null, cancellationToken, signatureVersion);
 
         if (outcome.Result.IsSuccess || outcome.TargetReturnedError)
         {
@@ -59,7 +60,8 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         string? requestId,
         JsonNode payload,
         ActionCallerContext? callerContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? signatureVersion = null)
     {
         // Every early exit here is a rejection before (or instead of) invoking the
         // target, so the transaction owner must never commit it -- only the
@@ -129,7 +131,8 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             callerContext?.ProcessId,
             callerContext?.JobId,
             callerContext?.ExecutionId,
-            callerContext?.AttemptId);
+            callerContext?.AttemptId,
+            signatureVersion);
 
         // Pass the version the manifest actually resolved to, not the caller's original
         // (possibly null/default) request -- so invoke can never resolve a different
@@ -249,6 +252,20 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
         if (context.AttemptId is { } attemptId)
         {
             contextJson["attemptId"] = attemptId.ToString();
+        }
+
+        // Nested, not flat: SPEC "Общая граница подписи" fixes the shape as
+        // {"transport": {"signatureVerified": true, "signatureVersion": N}}.
+        // Absent whenever no signature was verified, same "only when set" rule
+        // as every field above -- an action that never asks for it sees no
+        // context-shape change at all.
+        if (context.SignatureVersion is { } signatureVersion)
+        {
+            contextJson["transport"] = new JsonObject
+            {
+                ["signatureVerified"] = true,
+                ["signatureVersion"] = signatureVersion,
+            };
         }
 
         var envelope = await ExecuteScalarJsonAsync(

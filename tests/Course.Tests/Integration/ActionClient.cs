@@ -1,8 +1,19 @@
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 
 namespace Course.Tests.Integration;
+
+// Ticket 07: builds the same "v1=<lowercase-hex-hmac>" header value the real
+// receipt-adapter will send (ticket 12), over whatever exact body bytes the
+// test is about to POST -- never over a re-serialized JsonNode, which is
+// exactly the bug the boundary itself exists to reject.
+internal static class ProviderSignature
+{
+    public static string Header(string secret, byte[] bodyBytes, int version = 1) =>
+        $"v{version}={Convert.ToHexStringLower(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), bodyBytes))}";
+}
 
 // Thin POST /api/{module}/{action} wrapper shared by every integration test:
 // builds the request exactly as contract-reference's "HTTP API" section
@@ -16,7 +27,8 @@ internal static class ActionClient
         string token,
         JsonNode payload,
         string? idempotencyKey = null,
-        int? actionVersion = null)
+        int? actionVersion = null,
+        string? signatureHeader = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
@@ -34,6 +46,11 @@ internal static class ActionClient
             request.Headers.Add("X-Action-Version", actionVersion.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
+        if (signatureHeader is not null)
+        {
+            request.Headers.Add("X-Provider-Signature", signatureHeader);
+        }
+
         using var response = await client.SendAsync(request);
         var text = await response.Content.ReadAsStringAsync();
         return new ActionResponse((int)response.StatusCode, JsonNode.Parse(text)!);
@@ -43,7 +60,7 @@ internal static class ActionClient
     // whitespace are what some tests are about, and a JsonNode round trip would
     // normalise exactly those away.
     public static async Task<ActionResponse> PostRawActionAsync(
-        this HttpClient client, string path, string token, string body, string? idempotencyKey = null)
+        this HttpClient client, string path, string token, string body, string? idempotencyKey = null, string? signatureHeader = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
@@ -54,6 +71,11 @@ internal static class ActionClient
         if (idempotencyKey is not null)
         {
             request.Headers.Add("Idempotency-Key", idempotencyKey);
+        }
+
+        if (signatureHeader is not null)
+        {
+            request.Headers.Add("X-Provider-Signature", signatureHeader);
         }
 
         using var response = await client.SendAsync(request);

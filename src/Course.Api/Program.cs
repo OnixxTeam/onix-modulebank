@@ -1,3 +1,4 @@
+using System.Text;
 using Course.Api.Endpoints;
 using Course.Api.Middleware;
 using Course.Core.Actions;
@@ -24,6 +25,13 @@ var jwtOptions = new JwtOptions(
     Audience: RequireEnv("COURSE_JWT_AUDIENCE"),
     SigningKey: RequireEnv("COURSE_JWT_SIGNING_KEY"));
 
+// Ticket 07: exact UTF-8 bytes of the env var, never trimmed or decoded --
+// the most common way to get the signature boundary wrong (SPEC "Обработать
+// секрет как закодированный"). Missing entirely is a startup failure via
+// RequireEnv, not a silently-open boundary (SPEC "Отсутствие секрета в
+// конфигурации приводит к явному отказу на старте").
+var providerHmacSecret = Encoding.UTF8.GetBytes(RequireEnv("PROVIDER_HMAC_SECRET"));
+
 // One NpgsqlDataSource for the process lifetime; connections are taken from it
 // per request/health-check, never cached, so readiness recovers on its own once
 // PostgreSQL comes back -- no state to reset after a stop/start cycle.
@@ -36,6 +44,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IActionExecutor, PostgresActionExecutor>();
 builder.Services.AddSingleton<IOpenApiBuilder, CatalogOpenApiBuilder>();
 builder.Services.AddSingleton<IJwtAuthenticator>(new JwtContextFactory(jwtOptions));
+builder.Services.AddSingleton<ISignatureVerifier>(new ProviderSignatureVerifier(providerHmacSecret));
 
 var app = builder.Build();
 

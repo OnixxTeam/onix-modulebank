@@ -22,6 +22,7 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         ["action.not_found"] = 404,
         ["idempotency.conflict"] = 409,
         ["workflow.decision_conflict"] = 409,
+        ["signature.invalid"] = 401,
         ["payload.invalid"] = 422,
         ["dependency.unavailable"] = 503,
         ["action.contract_violation"] = 500,
@@ -40,6 +41,11 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         new(400, "idempotency.required", "Idempotency-Key header is required for this action");
 
     public static ActionError AccessDenied() => new(403, "access.denied", "insufficient policy for this action");
+
+    // Raised by the generic signature boundary itself (ticket 07), never by a
+    // target: wrong header format, unknown version, or a mismatched HMAC all
+    // collapse into this one code, before the target is ever called.
+    public static ActionError SignatureInvalid() => new(401, "signature.invalid", "X-Provider-Signature is missing, malformed, or does not verify");
 
     public static ActionError ActionNotFound() => new(404, "action.not_found", "action or version not found");
 
