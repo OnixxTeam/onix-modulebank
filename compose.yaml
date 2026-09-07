@@ -99,5 +99,49 @@ services:
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
 
+  # Given external component, pinned by digest (SPEC "Provider image
+  # закреплён по digest") -- tag alone is never trusted. No host port: the
+  # only Compose-visible network is the internal one, gateway stays the sole
+  # external entry point.
+  provider-simulator:
+    image: ghcr.io/fintech-dev-lab/internship-provider-simulator@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
+    environment:
+      # receipt-adapter (ticket 12) doesn't exist yet -- callbacks fail to
+      # connect until then, which does not affect this ticket's own scope
+      # (outbox-dispatcher never reads a callback).
+      CALLBACK_URL: http://receipt-adapter:8082/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY:-local-dev-capability}
+      AUDIT_TOKEN: ${PROVIDER_AUDIT_TOKEN:-}
+      # SIMULATOR_MODE/CALLBACK_DELAY/CALLBACK_TIMEOUT/CALLBACK_MAX_ATTEMPTS/
+      # CALLBACK_RETRY_DELAY are deliberately absent, not set to an empty
+      # `${VAR:-}` default: the image rejects an *empty* SIMULATOR_MODE
+      # outright ("SIMULATOR_MODE is not supported"), unlike a genuinely
+      # unset variable, which it defaults to "success" -- confirmed by
+      # running the pinned image directly. The checker supplies its own
+      # real values per scenario when it wants anything else.
+
+
+  # One locally built image, three entrypoints (SPEC "Три Python-сервиса
+  # запускаются разными entrypoints одного локально собранного image") --
+  # this ticket wires only the one that exists so far. No host port; the
+  # dispatcher never reads physical tables, only delivery.claim_outbox/
+  # succeed_outbox/fail_outbox under its own least-privilege role (ticket 09).
+  outbox-dispatcher:
+    build: {context: ./python}
+    image: perimeter:local
+    command: ["outbox-dispatcher"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: outbox_dispatcher
+      PGPASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      PGAPPNAME: outbox-dispatcher
+      PROVIDER_URL: ${PROVIDER_URL:-http://provider-simulator:8081}
+      OUTBOX_OWNER: ${OUTBOX_OWNER:-outbox-dispatcher}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider-simulator: {condition: service_started}
+
 volumes:
   pgdata:
