@@ -82,6 +82,19 @@ services:
       <<: *course-db-env
       COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
       COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
+      # Week 2's fencing probe (`flow test-finish`) connects as workflow_worker
+      # -- it calls the production finish boundary a real worker calls, so it
+      # needs that role's credential and no other. Before the password defaults
+      # left *course-db-env (ticket 14), cli inherited this implicitly; dropping
+      # it turned the probe's stale-finish rejection into internal.error and
+      # failed week 2's two-worker-reclaim-and-stale-finish check.
+      #
+      # Deliberately sourced from WORKFLOW_WORKER_PASSWORD and not from
+      # COURSE_WORKER_PASSWORD: week 3's secret-distribution rule allows the
+      # worker password in postgres/worker-a/worker-b only, so routing the
+      # graded variable through cli would trade a week-2 failure for a week-3
+      # admission failure.
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
     restart: "no"
     depends_on: {postgres: {condition: service_healthy}}
 
