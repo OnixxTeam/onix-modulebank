@@ -24,6 +24,8 @@ public sealed class PostgresFixture : IAsyncLifetime
     private const string PublisherPassword = "test-publisher-password";
     private const string RuntimePassword = "test-runtime-password";
     private const string WorkerPassword = "test-worker-password";
+    private const string OutboxPassword = "test-outbox-password";
+    private const string InboxPassword = "test-inbox-password";
     private const string SuperuserPassword = "test-superuser-password";
     private const string DatabaseName = "course";
 
@@ -35,6 +37,8 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("COURSE_PUBLISHER_PASSWORD", PublisherPassword)
         .WithEnvironment("COURSE_RUNTIME_PASSWORD", RuntimePassword)
         .WithEnvironment("WORKFLOW_WORKER_PASSWORD", WorkerPassword)
+        .WithEnvironment("COURSE_OUTBOX_PASSWORD", OutboxPassword)
+        .WithEnvironment("COURSE_INBOX_PASSWORD", InboxPassword)
         .WithResourceMapping(
             new FileInfo(RepoPaths.Combine("db", "init", "00-roles.sh")),
             new FileInfo("/docker-entrypoint-initdb.d/00-roles.sh"))
@@ -45,6 +49,10 @@ public sealed class PostgresFixture : IAsyncLifetime
     public string PublisherConnectionString => BuildConnectionString("course_publisher", PublisherPassword);
 
     public string WorkerConnectionString => BuildConnectionString("workflow_worker", WorkerPassword);
+
+    public string OutboxDispatcherConnectionString => BuildConnectionString("outbox_dispatcher", OutboxPassword);
+
+    public string InboxReconcilerConnectionString => BuildConnectionString("inbox_reconciler", InboxPassword);
 
     public IActionPublisher Publisher { get; private set; } = null!;
 
