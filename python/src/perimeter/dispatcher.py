@@ -20,7 +20,7 @@ from perimeter import db
 from perimeter.classify import ClassificationResult, Retry, Success, Terminal, classify_http_response, classify_transport_failure
 from perimeter.config import DispatcherConfig, MissingConfigError, load_dispatcher_config
 from perimeter.request import build_provider_request
-from perimeter.runloop import ShutdownFlag
+from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
 
 logger = logging.getLogger("perimeter.dispatcher")
 
@@ -65,7 +65,11 @@ def run(config: DispatcherConfig) -> None:
 
     with psycopg.connect(autocommit=True) as conn, httpx.Client(follow_redirects=False) as client:
         while not shutdown.requested:
-            claims = db.claim_outbox(conn, config.owner, config.claim_limit)
+            try:
+                claims = db.claim_outbox(conn, config.owner, config.claim_limit)
+            except psycopg.Error as exc:
+                log_and_wait_after_transient_db_error(logger, "outbox claim", exc, config.poll_interval_seconds)
+                continue
 
             if not claims:
                 time.sleep(config.poll_interval_seconds)
