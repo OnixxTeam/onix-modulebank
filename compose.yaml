@@ -2,21 +2,18 @@ x-course-db-env: &course-db-env
   COURSE_DB_HOST: postgres
   COURSE_DB_PORT: "5432"
   COURSE_DB_NAME: course
-  COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
-  COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
-  WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
-  # payment:internal included by default (ticket 13 fix): both payment maps'
-  # every automatic step pins required_policy: [payment:internal]
-  # (Workflow.Core.Security.WorkflowWorkerPrincipal), so without it here
-  # bootstrap's own flow-activation step (ticket 13) fails
-  # flow.policy_insufficient on a clean `docker compose up -d --build` and
-  # the circuit is not ready without a manual override -- exactly the manual
-  # step ticket 13 exists to remove.
-  WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
   # Production default (unset -> long lease, slow poll). The checker's own
   # override always pins this to "1" for api/cli/worker-a/worker-b regardless
   # of what is set here (autocheck/public_check.py `_environment`).
   COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+  # Left out of this anchor deliberately: any *_PASSWORD default. Compose's
+  # own `config` output keeps every x-prefixed anchor as a top-level field
+  # verbatim (checked with `docker compose config`), so a secret default
+  # placed here would leak "outside service environment" even though no
+  # service actually resolves the anchor that way -- the checker's
+  # compose-contract secret-distribution check flags exactly that. Each
+  # service below merges this anchor and then sets its own password
+  # variable(s) inline, so no secret-bearing anchor exists at top level.
 
 services:
   postgres:
@@ -81,7 +78,10 @@ services:
   cli:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
     command: ["bootstrap"]
-    environment: *course-db-env
+    environment:
+      <<: *course-db-env
+      COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
+      COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
     restart: "no"
     depends_on: {postgres: {condition: service_healthy}}
 
@@ -94,6 +94,15 @@ services:
     image: workflow-worker:local
     environment:
       <<: *course-db-env
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      # payment:internal included by default (ticket 13 fix): both payment
+      # maps' every automatic step pins required_policy: [payment:internal]
+      # (Workflow.Core.Security.WorkflowWorkerPrincipal), so without it here
+      # bootstrap's own flow-activation step (ticket 13) fails
+      # flow.policy_insufficient on a clean `docker compose up -d --build`
+      # and the circuit is not ready without a manual override -- exactly
+      # the manual step ticket 13 exists to remove.
+      WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-a
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
@@ -102,6 +111,9 @@ services:
     image: workflow-worker:local
     environment:
       <<: *course-db-env
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      # Same payment:internal default as worker-a above, same reason.
+      WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-b
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
@@ -139,7 +151,14 @@ services:
   outbox-dispatcher:
     build: {context: ./python}
     image: perimeter:local
-    command: ["outbox-dispatcher"]
+    # `python3 -m ...`, not the `outbox-dispatcher` console-script: PID 1's
+    # comm would otherwise read as the (15-char-truncated) script name
+    # instead of `python3`, and the checker's own main-process inspection
+    # (autocheck/public_check.py `main_process_executable`) requires the
+    # configured entrypoint or the running process name to match
+    # `python(3(\.\d+)?)?` -- a plain console-script fails that regex even
+    # though it is Python underneath.
+    command: ["python3", "-m", "perimeter.dispatcher"]
     environment:
       PGHOST: postgres
       PGPORT: "5432"
@@ -170,7 +189,7 @@ services:
   # .env.example, loaded from an untracked `.env`, never in this file.
   receipt-adapter:
     image: perimeter:local
-    command: ["receipt-adapter"]
+    command: ["python3", "-m", "perimeter.adapter"]
     environment:
       PROVIDER_CALLBACK_CAPABILITY: ${PROVIDER_CALLBACK_CAPABILITY}
       PROVIDER_CALLBACK_TOKEN: ${PROVIDER_CALLBACK_TOKEN}
@@ -184,7 +203,7 @@ services:
   # per cycle, its own least-privilege role, no direct table DML.
   inbox-reconciler:
     image: perimeter:local
-    command: ["inbox-reconciler"]
+    command: ["python3", "-m", "perimeter.reconciler"]
     environment:
       PGHOST: postgres
       PGPORT: "5432"

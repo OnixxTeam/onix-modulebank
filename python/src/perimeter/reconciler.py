@@ -19,7 +19,7 @@ import psycopg
 
 from perimeter import db
 from perimeter.config import MissingConfigError, ReconcilerConfig, load_reconciler_config
-from perimeter.runloop import ShutdownFlag
+from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
 
 logger = logging.getLogger("perimeter.reconciler")
 
@@ -30,7 +30,11 @@ def run(config: ReconcilerConfig) -> None:
 
     with psycopg.connect(autocommit=True) as conn:
         while not shutdown.requested:
-            applied = db.reconcile_inbox(conn, config.limit)
+            try:
+                applied = db.reconcile_inbox(conn, config.limit)
+            except psycopg.Error as exc:
+                log_and_wait_after_transient_db_error(logger, "inbox reconcile", exc, config.poll_interval_seconds)
+                continue
 
             if applied:
                 logger.info("inbox reconciled", extra={"applied": applied})

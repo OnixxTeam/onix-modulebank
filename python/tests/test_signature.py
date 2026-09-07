@@ -36,3 +36,28 @@ def test_the_key_is_used_as_exact_bytes_not_trimmed():
     body = b"body"
 
     assert sign_hex(b"secret", body) != sign_hex(b"secret ", body)
+
+
+def test_a_key_with_leading_and_trailing_spaces_signs_as_its_own_exact_bytes():
+    secret = b"  padded-secret  "
+    body = b"body"
+
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+
+    assert sign_hex(secret, body) == expected
+    # Confirms the padding is not silently stripped along the way: a trimmed
+    # key would produce this different digest instead.
+    assert sign_hex(secret, body) != hmac.new(b"padded-secret", body, hashlib.sha256).hexdigest()
+
+
+def test_a_key_that_looks_like_base64_signs_as_its_own_literal_bytes_not_decoded():
+    # "c2VjcmV0LWJ5dGVz" happens to be valid Base64 (it decodes to
+    # b"secret-bytes") -- the key must still be used as the ASCII string's own
+    # bytes, never base64-decoded first.
+    secret = b"c2VjcmV0LWJ5dGVz"
+    body = b"body"
+
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+
+    assert sign_hex(secret, body) == expected
+    assert sign_hex(secret, body) != hmac.new(b"secret-bytes", body, hashlib.sha256).hexdigest()
