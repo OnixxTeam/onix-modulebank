@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 outbox-dispatcher = "perimeter.dispatcher:main"
 receipt-adapter = "perimeter.adapter:main"
+inbox-reconciler = "perimeter.reconciler:main"
 
 [build-system]
 requires = ["hatchling"]

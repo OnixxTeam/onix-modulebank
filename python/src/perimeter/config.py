@@ -39,6 +39,14 @@ ADAPTER_REQUIRED_VARS = (
     "RECEIPT_API_URL",
 )
 
+RECONCILER_REQUIRED_VARS = (
+    "PGHOST",
+    "PGDATABASE",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGAPPNAME",
+)
+
 
 class MissingConfigError(RuntimeError):
     """Raised when a required environment variable is absent."""
@@ -99,4 +107,28 @@ def load_adapter_config(env: dict[str, str] | None = None) -> AdapterConfig:
         # own equally-literal PGUSER/PGAPPNAME rule).
         hmac_secret=env["PROVIDER_HMAC_SECRET"].encode("utf-8"),
         receipt_api_url=env["RECEIPT_API_URL"].rstrip("/"),
+    )
+
+
+@dataclass(frozen=True)
+class ReconcilerConfig:
+    poll_interval_seconds: float
+    limit: int
+
+
+def load_reconciler_config(env: dict[str, str] | None = None) -> ReconcilerConfig:
+    env = os.environ if env is None else env
+
+    missing = [name for name in RECONCILER_REQUIRED_VARS if not env.get(name)]
+    if missing:
+        raise MissingConfigError(missing)
+
+    # configuration.md/04-week-3.md: test profile poll interval must not
+    # exceed 500 ms; production keeps a slower default, same convention as
+    # the dispatcher's own test-profile switch.
+    test_profile = env.get("COURSE_TEST_PROFILE") == "1"
+
+    return ReconcilerConfig(
+        poll_interval_seconds=0.2 if test_profile else 2.0,
+        limit=20,
     )

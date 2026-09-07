@@ -5,7 +5,14 @@ x-course-db-env: &course-db-env
   COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
   COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
   WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
-  WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read}
+  # payment:internal included by default (ticket 13 fix): both payment maps'
+  # every automatic step pins required_policy: [payment:internal]
+  # (Workflow.Core.Security.WorkflowWorkerPrincipal), so without it here
+  # bootstrap's own flow-activation step (ticket 13) fails
+  # flow.policy_insufficient on a clean `docker compose up -d --build` and
+  # the circuit is not ready without a manual override -- exactly the manual
+  # step ticket 13 exists to remove.
+  WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
   # Production default (unset -> long lease, slow poll). The checker's own
   # override always pins this to "1" for api/cli/worker-a/worker-b regardless
   # of what is set here (autocheck/public_check.py `_environment`).
@@ -124,11 +131,11 @@ services:
 
   # One locally built image, three entrypoints (SPEC "Три Python-сервиса
   # запускаются разными entrypoints одного локально собранного image"). Only
-  # this service declares `build:` -- receipt-adapter below just references
-  # the same `perimeter:local` tag, same pattern as worker-a/worker-b sharing
-  # `workflow-worker:local`. No host port; the dispatcher never reads
-  # physical tables, only delivery.claim_outbox/succeed_outbox/fail_outbox
-  # under its own least-privilege role (ticket 09).
+  # this service declares `build:` -- receipt-adapter and inbox-reconciler
+  # below just reference the same `perimeter:local` tag, same pattern as
+  # worker-a/worker-b sharing `workflow-worker:local`. No host port; the
+  # dispatcher never reads physical tables, only delivery.claim_outbox/
+  # succeed_outbox/fail_outbox under its own least-privilege role (ticket 09).
   outbox-dispatcher:
     build: {context: ./python}
     image: perimeter:local
@@ -172,6 +179,22 @@ services:
       COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
     depends_on:
       gateway: {condition: service_started}
+
+  # Ticket 13: the thinnest of the three -- one call to delivery.reconcile_inbox
+  # per cycle, its own least-privilege role, no direct table DML.
+  inbox-reconciler:
+    image: perimeter:local
+    command: ["inbox-reconciler"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: inbox_reconciler
+      PGPASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
+      PGAPPNAME: inbox-reconciler
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:
