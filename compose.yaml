@@ -2,14 +2,18 @@ x-course-db-env: &course-db-env
   COURSE_DB_HOST: postgres
   COURSE_DB_PORT: "5432"
   COURSE_DB_NAME: course
-  COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
-  COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
-  WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
-  WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read}
   # Production default (unset -> long lease, slow poll). The checker's own
   # override always pins this to "1" for api/cli/worker-a/worker-b regardless
   # of what is set here (autocheck/public_check.py `_environment`).
   COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+  # Left out of this anchor deliberately: any *_PASSWORD default. Compose's
+  # own `config` output keeps every x-prefixed anchor as a top-level field
+  # verbatim (checked with `docker compose config`), so a secret default
+  # placed here would leak "outside service environment" even though no
+  # service actually resolves the anchor that way -- the checker's
+  # compose-contract secret-distribution check flags exactly that. Each
+  # service below merges this anchor and then sets its own password
+  # variable(s) inline, so no secret-bearing anchor exists at top level.
 
 services:
   postgres:
@@ -22,6 +26,8 @@ services:
       COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
       COURSE_RUNTIME_PASSWORD: ${COURSE_RUNTIME_PASSWORD:-runtime}
       WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      COURSE_OUTBOX_PASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      COURSE_INBOX_PASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -46,6 +52,11 @@ services:
       COURSE_JWT_AUDIENCE: moduledev-api
       COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
       COURSE_RUNTIME_DSN: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=${COURSE_RUNTIME_PASSWORD:-runtime}
+      # Ticket 07: the generic signature boundary's HMAC key. Named exactly
+      # PROVIDER_HMAC_SECRET (SPEC/checker fixture), shared with receipt-adapter
+      # once ticket 12 builds it -- both sides must sign/verify with the same
+      # bytes. No tracked default of real value; the checker always replaces it.
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET:-dev-insecure-hmac-secret-not-for-production}
     # Not depends_on: cli -- week 2's open checker builds and starts only the
     # six services TASK.md actually requires (this one plus cli, gateway,
     # postgres, worker-a, worker-b), scoped by name, so a hard dependency on
@@ -67,7 +78,23 @@ services:
   cli:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
     command: ["bootstrap"]
-    environment: *course-db-env
+    environment:
+      <<: *course-db-env
+      COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
+      COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
+      # Week 2's fencing probe (`flow test-finish`) connects as workflow_worker
+      # -- it calls the production finish boundary a real worker calls, so it
+      # needs that role's credential and no other. Before the password defaults
+      # left *course-db-env (ticket 14), cli inherited this implicitly; dropping
+      # it turned the probe's stale-finish rejection into internal.error and
+      # failed week 2's two-worker-reclaim-and-stale-finish check.
+      #
+      # Deliberately sourced from WORKFLOW_WORKER_PASSWORD and not from
+      # COURSE_WORKER_PASSWORD: week 3's secret-distribution rule allows the
+      # worker password in postgres/worker-a/worker-b only, so routing the
+      # graded variable through cli would trade a week-2 failure for a week-3
+      # admission failure.
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
     restart: "no"
     depends_on: {postgres: {condition: service_healthy}}
 
@@ -80,6 +107,15 @@ services:
     image: workflow-worker:local
     environment:
       <<: *course-db-env
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      # payment:internal included by default (ticket 13 fix): both payment
+      # maps' every automatic step pins required_policy: [payment:internal]
+      # (Workflow.Core.Security.WorkflowWorkerPrincipal), so without it here
+      # bootstrap's own flow-activation step (ticket 13) fails
+      # flow.policy_insufficient on a clean `docker compose up -d --build`
+      # and the circuit is not ready without a manual override -- exactly
+      # the manual step ticket 13 exists to remove.
+      WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-a
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
@@ -88,9 +124,109 @@ services:
     image: workflow-worker:local
     environment:
       <<: *course-db-env
+      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      # Same payment:internal default as worker-a above, same reason.
+      WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-b
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
+
+  # Given external component, pinned by digest (SPEC "Provider image
+  # закреплён по digest") -- tag alone is never trusted. No host port: the
+  # only Compose-visible network is the internal one, gateway stays the sole
+  # external entry point.
+  provider-simulator:
+    image: ghcr.io/fintech-dev-lab/internship-provider-simulator@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
+    environment:
+      # No compose-level default here: PROVIDER_CALLBACK_CAPABILITY is one of
+      # the three variables configuration.md's own table marks
+      # "Default в tracked Compose: Нет" (unlike PROVIDER_URL/OUTBOX_OWNER,
+      # which the table explicitly allows a default for) -- a working local
+      # value lives in .env.example instead, loaded from `.env`, never
+      # baked into this tracked file.
+      CALLBACK_URL: http://receipt-adapter:8082/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY}
+      AUDIT_TOKEN: ${PROVIDER_AUDIT_TOKEN:-}
+      # SIMULATOR_MODE/CALLBACK_DELAY/CALLBACK_TIMEOUT/CALLBACK_MAX_ATTEMPTS/
+      # CALLBACK_RETRY_DELAY are deliberately absent, not set to an empty
+      # `${VAR:-}` default: the image rejects an *empty* SIMULATOR_MODE
+      # outright ("SIMULATOR_MODE is not supported"), unlike a genuinely
+      # unset variable, which it defaults to "success" -- confirmed by
+      # running the pinned image directly. The checker supplies its own
+      # real values per scenario when it wants anything else.
+
+  # One locally built image, three entrypoints (SPEC "Три Python-сервиса
+  # запускаются разными entrypoints одного локально собранного image"). Only
+  # this service declares `build:` -- receipt-adapter and inbox-reconciler
+  # below just reference the same `perimeter:local` tag, same pattern as
+  # worker-a/worker-b sharing `workflow-worker:local`. No host port; the
+  # dispatcher never reads physical tables, only delivery.claim_outbox/
+  # succeed_outbox/fail_outbox under its own least-privilege role (ticket 09).
+  outbox-dispatcher:
+    build: {context: ./python}
+    image: perimeter:local
+    # `python3 -m ...`, not the `outbox-dispatcher` console-script: PID 1's
+    # comm would otherwise read as the (15-char-truncated) script name
+    # instead of `python3`, and the checker's own main-process inspection
+    # (autocheck/public_check.py `main_process_executable`) requires the
+    # configured entrypoint or the running process name to match
+    # `python(3(\.\d+)?)?` -- a plain console-script fails that regex even
+    # though it is Python underneath.
+    command: ["python3", "-m", "perimeter.dispatcher"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: outbox_dispatcher
+      PGPASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
+      PGAPPNAME: outbox-dispatcher
+      PROVIDER_URL: ${PROVIDER_URL:-http://provider-simulator:8081}
+      OUTBOX_OWNER: ${OUTBOX_OWNER:-outbox-dispatcher}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider-simulator: {condition: service_started}
+
+  # Ticket 12: the anti-corruption layer. No PGHOST/PGUSER/... entry at all --
+  # this process has no PostgreSQL credentials in any form (SPEC/acceptance:
+  # "У процесса нет учётных данных к PostgreSQL ни в каком виде"), and no
+  # host port either, matching every other Python service.
+  #
+  # PROVIDER_CALLBACK_CAPABILITY/PROVIDER_CALLBACK_TOKEN carry no compose-level
+  # default on purpose -- configuration.md's table marks both
+  # "Default в tracked Compose: Нет" (04-week-3.md: "Synthetic JWT/HMAC/
+  # capability values передаются только через environment проверочного
+  # запуска и не имеют default в tracked Compose"), unlike PROVIDER_HMAC_SECRET
+  # just above (an existing ticket-07 default, not this ticket's to remove).
+  # A missing value here means the adapter fails fast on start (ticket 12
+  # acceptance), exactly as required; local dev values live only in
+  # .env.example, loaded from an untracked `.env`, never in this file.
+  receipt-adapter:
+    image: perimeter:local
+    command: ["python3", "-m", "perimeter.adapter"]
+    environment:
+      PROVIDER_CALLBACK_CAPABILITY: ${PROVIDER_CALLBACK_CAPABILITY}
+      PROVIDER_CALLBACK_TOKEN: ${PROVIDER_CALLBACK_TOKEN}
+      PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET:-dev-insecure-hmac-secret-not-for-production}
+      RECEIPT_API_URL: ${RECEIPT_API_URL:-http://gateway:8080/api/receipt/accept}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      gateway: {condition: service_started}
+
+  # Ticket 13: the thinnest of the three -- one call to delivery.reconcile_inbox
+  # per cycle, its own least-privilege role, no direct table DML.
+  inbox-reconciler:
+    image: perimeter:local
+    command: ["python3", "-m", "perimeter.reconciler"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: course
+      PGUSER: inbox_reconciler
+      PGPASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
+      PGAPPNAME: inbox-reconciler
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:

@@ -39,6 +39,9 @@ stop_prod:  ## остановить полный стек
 check:  ## прогнать проверку задания
 	./check.sh
 
+e2e:  ## быстрый сквозной прогон обеих карт поверх уже собранного compose (ticket 14)
+	python3 scripts/e2e_smoke.py
+
 SERVICE ?= postgres
 logs:  ## логи compose-стека, SERVICE=<имя> выбирает сервис
 	docker compose logs -f $(SERVICE)
@@ -49,4 +52,4 @@ psql:  ## psql-сессия в контейнер postgres; ARGS="-c '...'" пе
 clean:  ## удалить bin/ и obj/
 	find . -type d \( -name bin -o -name obj \) -not -path './.scratch/*' -prune -exec rm -rf {} +
 
-.PHONY: help start_local_db start_local_api start_local_gateway start_local_cli format lint test ci start_prod stop_prod check logs psql clean
+.PHONY: help start_local_db start_local_api start_local_gateway start_local_cli format lint test ci start_prod stop_prod check e2e logs psql clean

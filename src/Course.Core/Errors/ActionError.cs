@@ -21,7 +21,16 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         ["access.denied"] = 403,
         ["action.not_found"] = 404,
         ["idempotency.conflict"] = 409,
+        ["workflow.decision_conflict"] = 409,
+        ["signature.invalid"] = 401,
+        // These two are receipt.accept_v1's own business codes (ticket 08), not
+        // runtime ones -- but their contract-fixed statuses (403, 422) don't
+        // match what the generic business-code fallback below would derive
+        // (400, since neither code's last segment is literally "not_found"),
+        // so they need an explicit entry same as payload.invalid already has.
+        ["receipt.signature_required"] = 403,
         ["payload.invalid"] = 422,
+        ["receipt.external_request_not_found"] = 422,
         ["dependency.unavailable"] = 503,
         ["action.contract_violation"] = 500,
         ["action.timeout"] = 504,
@@ -32,10 +41,18 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
 
     public static ActionError RequestInvalid(string message) => new(400, "request.invalid", message);
 
+    public static ActionError RequestTooLarge(int maxBytes) =>
+        new(413, "request.too_large", $"request body exceeds {maxBytes} bytes");
+
     public static ActionError IdempotencyRequired() =>
         new(400, "idempotency.required", "Idempotency-Key header is required for this action");
 
     public static ActionError AccessDenied() => new(403, "access.denied", "insufficient policy for this action");
+
+    // Raised by the generic signature boundary itself (ticket 07), never by a
+    // target: wrong header format, unknown version, or a mismatched HMAC all
+    // collapse into this one code, before the target is ever called.
+    public static ActionError SignatureInvalid() => new(401, "signature.invalid", "X-Provider-Signature is missing, malformed, or does not verify");
 
     public static ActionError ActionNotFound() => new(404, "action.not_found", "action or version not found");
 

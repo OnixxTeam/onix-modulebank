@@ -31,7 +31,12 @@ try
                 // pass directory arguments.
                 migrationsDirectory: "/app/migrations",
                 manifestsDirectory: "/app/manifests",
-                CancellationToken.None);
+                CancellationToken.None,
+                flowMapValidator: BuildWorkflowMapValidator(),
+                flowPublisher: new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                // Baked in by Course.Cli/Dockerfile (COPY db/maps -> /app/maps),
+                // same reasoning as migrationsDirectory/manifestsDirectory above.
+                flowMapsDirectory: "/app/maps");
             break;
         case "action validate":
             envelope = await ActionValidateCommand.ExecuteAsync(
