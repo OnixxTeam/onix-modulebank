@@ -93,6 +93,14 @@ PostgreSQL, не в C#), [ADR 0005](docs/adr/0005-adapter-signs-exact-bytes.md) 
 Интервалы аренды и поллинга берутся из `COURSE_TEST_PROFILE` (`1` — тестовый
 профиль: аренда 2s, poll ≤100ms; иначе production-профиль: аренда 30s, poll
 1s) с точечным override через `WORKFLOW_WORKER_LEASE_MS`/`_POLL_MS`.
+
+Аренда Outbox подчиняется тому же профилю, но живёт в базе: `bootstrap`
+записывает её в `delivery.retry_policy.lease_ms` (2s при
+`COURSE_TEST_PROFILE=1`, иначе 30s; точечный override —
+`COURSE_OUTBOX_LEASE_MS`), а `delivery.claim_outbox` читает оттуда — его
+сигнатура закреплена контрактом и не принимает аренду аргументом. Бюджет
+повторов (4 попытки, задержки 200/400/800 мс) в обоих профилях одинаков и
+задаётся миграцией.
 `COURSE_FAILPOINT` включает именованные точки останова для воспроизводимых
 аварийных сценариев (`Failpoints.cs`) — используется только тестовым
 профилем, в production не задан.

@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
 using Course.Core.Cli;
+using Course.Core.Delivery;
 using Course.Core.Migrations;
 using Course.Core.Validation;
 using Workflow.Core.Canonicalization;
@@ -48,13 +49,28 @@ public static class BootstrapCommand
         CancellationToken cancellationToken,
         WorkflowMapValidator? flowMapValidator = null,
         IWorkflowFlowPublisher? flowPublisher = null,
-        string? flowMapsDirectory = null)
+        string? flowMapsDirectory = null,
+        IDeliveryProfile? deliveryProfile = null,
+        int? outboxLeaseMs = null)
     {
         var migrationCommand = new ParsedCommand("bootstrap", [migrationsDirectory], new Dictionary<string, string>());
         var migrationEnvelope = await MigrationApplyCommand.ExecuteAsync(migrationCommand, runner, cancellationToken);
         if (migrationEnvelope.Status != "ok")
         {
             return migrationEnvelope;
+        }
+
+        // Straight after the migrations that create the policy row, and
+        // before anything can claim against it. Re-applied on every run, so a
+        // stack restarted with a different COURSE_TEST_PROFILE ends up with the
+        // lease that profile asks for rather than the one the last boot left.
+        if (deliveryProfile is not null && outboxLeaseMs is { } leaseMs)
+        {
+            var leaseRaw = await deliveryProfile.SetLeaseMsAsync(leaseMs, cancellationToken);
+            if (FailureEnvelope(leaseRaw) is { } leaseFailure)
+            {
+                return leaseFailure;
+            }
         }
 
         var publishedActions = new List<object>();
@@ -84,9 +100,16 @@ public static class BootstrapCommand
         }
 
         var activatedFlows = new List<object>();
+        var keptActiveFlows = new List<object>();
 
         if (flowMapsDirectory is not null)
         {
+            // One listing for the whole loop, taken before anything is
+            // published: which flows an operator has already pinned is a
+            // property of the database as bootstrap found it, not of the
+            // database halfway through bootstrap's own publishing.
+            var alreadyActive = await ActiveFlowVersionsAsync(flowPublisher!, cancellationToken);
+
             foreach (var fileName in ProductionFlowMapFiles)
             {
                 var path = Path.Combine(flowMapsDirectory, fileName);
@@ -106,10 +129,19 @@ public static class BootstrapCommand
                 var flowName = publishRaw["flowName"]!.GetValue<string>();
                 var flowVersion = publishRaw["flowVersion"]!.GetValue<int>();
 
-                // Unconditional, unlike action activation above: exactly one
-                // version of each of these two flows is ever published today,
-                // so there is no operator decision (an `action disable`-style
-                // move to a different version) for a repeat run to clobber.
+                // First install only. This used to be unconditional, on the
+                // assumption that no other version of either bundled flow would
+                // ever exist -- which held right up to the first `flow publish`
+                // + `flow activate` of a v2, after which every `docker compose
+                // up` silently moved the active version back to the bundled v1.
+                // Same operator-choice rule the action half above already
+                // follows: a repeat run publishes, it does not re-decide.
+                if (alreadyActive.TryGetValue(flowName, out var pinnedVersion))
+                {
+                    keptActiveFlows.Add(new { flowName, flowVersion = pinnedVersion });
+                    continue;
+                }
+
                 var activateRaw = await flowPublisher.ActivateAsync(flowName, flowVersion, cancellationToken);
                 if (FailureEnvelope(activateRaw) is { } activateFailure)
                 {
@@ -127,7 +159,25 @@ public static class BootstrapCommand
             migration = migrationEnvelope.Result,
             actions = publishedActions,
             flows = activatedFlows,
+            keptActiveFlows,
+            outboxLeaseMs,
         });
+    }
+
+    // flowName -> the version an operator (or an earlier bootstrap) already
+    // activated. Absent from the map means the flow has no active version at
+    // all, which is the only case bootstrap gets to decide.
+    private static async Task<Dictionary<string, int>> ActiveFlowVersionsAsync(
+        IWorkflowFlowPublisher flowPublisher, CancellationToken cancellationToken)
+    {
+        var listed = await flowPublisher.ListAsync(cancellationToken);
+
+        return listed.AsArray()
+            .Where(entry => entry!["isActive"]!.GetValue<bool>())
+            .ToDictionary(
+                entry => entry!["flowName"]!.GetValue<string>(),
+                entry => entry!["flowVersion"]!.GetValue<int>(),
+                StringComparer.Ordinal);
     }
 
     // Shared by every raw jsonb result this method reads (action publish, flow
