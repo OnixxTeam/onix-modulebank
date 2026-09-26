@@ -226,12 +226,16 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
                 await ClaimAsDispatcherAsync($"dispatcher-delay-{attempt}", 10), r => r.ExternalRequestId == externalRequestId);
             await FailAsDispatcherAsync(claim.OutboxId, $"dispatcher-delay-{attempt}", claim.LeaseVersion, "transport.error.retryable");
 
-            // Measured server-side against the row's own next_attempt_at, so no
-            // client clock or round trip takes part in the comparison.
+            // next_attempt_at was set to now() + delay one statement ago, so the
+            // remaining wait is the delay minus however long this round trip
+            // took -- never more than the delay, and not much less. The floor
+            // has to stay wide enough for a loaded CI container yet tight
+            // enough to tell 200 from 400, which 100 ms of slack does for
+            // every value in the profile.
             var scheduledInMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
                 "select (extract(epoch from (next_attempt_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
                 ("id", externalRequestId));
-            Assert.InRange(scheduledInMs, expectedDelayMs - 150, expectedDelayMs);
+            Assert.InRange(scheduledInMs, expectedDelayMs - 100, expectedDelayMs);
         }
     }
 
