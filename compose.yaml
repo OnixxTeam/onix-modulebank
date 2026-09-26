@@ -28,6 +28,9 @@ services:
       WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
       COURSE_OUTBOX_PASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
       COURSE_INBOX_PASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
+      # Week 4, ticket 01: the read-only role the verifying run connects as.
+      # Addressed to `postgres` alone -- no other service receives it.
+      COURSE_AUTOCHECK_PASSWORD: ${COURSE_AUTOCHECK_PASSWORD:-autocheck}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

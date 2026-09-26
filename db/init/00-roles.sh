@@ -13,6 +13,7 @@ psql -v ON_ERROR_STOP=1 \
   -v workflow_worker_password="${WORKFLOW_WORKER_PASSWORD:?}" \
   -v course_outbox_password="${COURSE_OUTBOX_PASSWORD:?}" \
   -v course_inbox_password="${COURSE_INBOX_PASSWORD:?}" \
+  -v course_autocheck_password="${COURSE_AUTOCHECK_PASSWORD:?}" \
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-'SQL'
 	create role course_owner       nologin;
 	create role course_migrator    login password :'course_migrator_password' in role course_owner;
@@ -22,9 +23,38 @@ psql -v ON_ERROR_STOP=1 \
 	create role outbox_dispatcher  login password :'course_outbox_password';
 	create role inbox_reconciler   login password :'course_inbox_password';
 
+	-- The verifying run's own read-only channel: it executes every statement of
+	-- its check as this role and asserts current_user/transaction_read_only
+	-- before anything else. The role is created here rather than by a migration
+	-- because its password only ever reaches the postgres service
+	-- (COURSE_AUTOCHECK_PASSWORD is addressed to `postgres` alone in the
+	-- published configuration table) -- the migration runner, which runs as
+	-- `cli`, never sees it. Its grants do live in a migration, next to the
+	-- views they apply to.
+	--
+	-- Guarded rather than a bare `create role`: initdb scripts run only on an
+	-- empty data directory, but the verifying run recreates the Compose project
+	-- over the same named volume, and a role that already exists must not turn
+	-- a restart into a failed init.
+	do $$
+	begin
+	  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'autocheck_reader') then
+	    create role autocheck_reader login;
+	  end if;
+	end
+	$$;
+	alter role autocheck_reader
+	  login nosuperuser nocreatedb nocreaterole noreplication nobypassrls noinherit
+	  password :'course_autocheck_password';
+
+	-- Read-only on the role, not on the session: the verifying run sets no
+	-- parameter of its own, it connects and reads transaction_read_only back.
+	alter role autocheck_reader set default_transaction_read_only = on;
+
 	revoke all on database course from public;
 	grant connect on database course to
-	  course_migrator, course_publisher, course_runtime, workflow_worker, outbox_dispatcher, inbox_reconciler;
+	  course_migrator, course_publisher, course_runtime, workflow_worker, outbox_dispatcher, inbox_reconciler,
+	  autocheck_reader;
 	grant create on database course to course_owner;
 	revoke all on schema public from public;
 	SQL
