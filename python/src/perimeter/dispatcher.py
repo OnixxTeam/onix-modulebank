@@ -24,8 +24,6 @@ from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_erro
 
 logger = logging.getLogger("perimeter.dispatcher")
 
-_HTTP_TIMEOUT_SECONDS = 10.0
-
 
 def attempt_delivery(client: httpx.Client, config: DispatcherConfig, delivery: db.ClaimedDelivery) -> ClassificationResult:
     request = build_provider_request(delivery.external_request_id, delivery.correlation_id, delivery.amount, delivery.currency)
@@ -39,7 +37,7 @@ def attempt_delivery(client: httpx.Client, config: DispatcherConfig, delivery: d
                 "Idempotency-Key": request.idempotency_key,
                 "X-Correlation-ID": request.correlation_id,
             },
-            timeout=_HTTP_TIMEOUT_SECONDS,
+            timeout=config.provider_timeout_seconds,
         )
     except httpx.RequestError:
         return classify_transport_failure()
@@ -56,7 +54,16 @@ def process_claim(conn: psycopg.Connection, client: httpx.Client, config: Dispat
             logger.info("delivery succeeded", extra={"outbox_id": delivery.outbox_id})
         case Retry(error_code=error_code) | Terminal(error_code=error_code):
             db.fail_outbox(conn, delivery.outbox_id, config.owner, delivery.lease_version, error_code)
-            logger.info("delivery failed", extra={"outbox_id": delivery.outbox_id, "error_code": error_code})
+            # max_attempts is the denominator only: whether this failure spends the
+            # budget is fail_outbox's answer, not this process's.
+            logger.info(
+                "delivery failed",
+                extra={
+                    "outbox_id": delivery.outbox_id,
+                    "error_code": error_code,
+                    "max_attempts": config.max_attempts,
+                },
+            )
 
 
 def run(config: DispatcherConfig) -> None:

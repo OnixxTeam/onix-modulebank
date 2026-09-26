@@ -5,7 +5,15 @@ from perimeter.config import DispatcherConfig
 from perimeter.db import ClaimedDelivery
 from perimeter.dispatcher import attempt_delivery
 
-CONFIG = DispatcherConfig(provider_url="http://provider-simulator:8081", owner="outbox-dispatcher", poll_interval_seconds=0.2, claim_limit=5)
+CONFIG = DispatcherConfig(
+    provider_url="http://provider-simulator:8081",
+    owner="outbox-dispatcher",
+    poll_interval_seconds=0.1,
+    claim_limit=5,
+    provider_timeout_seconds=0.5,
+    max_attempts=4,
+    lease_seconds=2.0,
+)
 
 DELIVERY = ClaimedDelivery(
     outbox_id="outbox-1",
