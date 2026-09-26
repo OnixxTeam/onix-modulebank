@@ -6,17 +6,6 @@ path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 docker_config="${DOCKER_CONFIG:-$home/.docker}"
 docker_host="${DOCKER_HOST:-}"
 docker_context="${DOCKER_CONTEXT:-}"
-gateway_port="${COURSE_GATEWAY_PORT:-8080}"
-test_profile="${COURSE_TEST_PROFILE:-1}"
-failpoint="${COURSE_FAILPOINT:-}"
-
-# Admission checks inspect the declared 8080 contract, while runtime uses a free host port.
-for argument in "$@"; do
-  if [[ "$argument" == "config" ]]; then
-    gateway_port=8080
-    break
-  fi
-done
 
 exec env -i \
   PATH="$path" \
@@ -24,8 +13,25 @@ exec env -i \
   DOCKER_CONFIG="$docker_config" \
   DOCKER_HOST="$docker_host" \
   DOCKER_CONTEXT="$docker_context" \
-  COURSE_GATEWAY_PORT="$gateway_port" \
-  COURSE_TEST_PROFILE="$test_profile" \
-  COURSE_FAILPOINT="$failpoint" \
+  COURSE_GATEWAY_PORT="${COURSE_GATEWAY_PORT:-8080}" \
+  COURSE_TEST_PROFILE="${COURSE_TEST_PROFILE:-1}" \
+  COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-2}" \
+  COURSE_JWT_ISSUER="${COURSE_JWT_ISSUER:-}" \
+  COURSE_JWT_AUDIENCE="${COURSE_JWT_AUDIENCE:-}" \
+  COURSE_JWT_SIGNING_KEY="${COURSE_JWT_SIGNING_KEY:-}" \
+  COURSE_POSTGRES_PASSWORD="${COURSE_POSTGRES_PASSWORD:-}" \
+  COURSE_MIGRATOR_PASSWORD="${COURSE_MIGRATOR_PASSWORD:-}" \
+  COURSE_PUBLISHER_PASSWORD="${COURSE_PUBLISHER_PASSWORD:-}" \
+  COURSE_RUNTIME_PASSWORD="${COURSE_RUNTIME_PASSWORD:-}" \
+  COURSE_WORKER_PASSWORD="${COURSE_WORKER_PASSWORD:-}" \
+  COURSE_OUTBOX_PASSWORD="${COURSE_OUTBOX_PASSWORD:-}" \
+  COURSE_INBOX_PASSWORD="${COURSE_INBOX_PASSWORD:-}" \
+  PROVIDER_URL="${PROVIDER_URL:-}" \
+  OUTBOX_OWNER="${OUTBOX_OWNER:-}" \
+  PROVIDER_CALLBACK_CAPABILITY="${PROVIDER_CALLBACK_CAPABILITY:-}" \
+  PROVIDER_CALLBACK_TOKEN="${PROVIDER_CALLBACK_TOKEN:-}" \
+  PROVIDER_HMAC_SECRET="${PROVIDER_HMAC_SECRET:-}" \
+  RECEIPT_API_URL="${RECEIPT_API_URL:-}" \
+  PROVIDER_AUDIT_TOKEN="${PROVIDER_AUDIT_TOKEN:-}" \
   COMPOSE_DISABLE_ENV_FILE=1 \
   docker compose "$@"

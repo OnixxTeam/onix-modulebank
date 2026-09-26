@@ -34,12 +34,12 @@ public sealed class FlowValidateFixtureTests
     }
 
     public static IEnumerable<object[]> ValidFixtures() =>
-        Directory.GetFiles(RepoPaths.Combine("autocheck", "fixtures", "maps"), "*.flow.*", SearchOption.TopDirectoryOnly)
+        Directory.GetFiles(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps"), "*.flow.*", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => new object[] { path });
 
     public static IEnumerable<object[]> InvalidFixtures() =>
-        Directory.GetFiles(RepoPaths.Combine("autocheck", "fixtures", "maps", "invalid"), "*.flow.json", SearchOption.AllDirectories)
+        Directory.GetFiles(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "invalid"), "*.flow.json", SearchOption.AllDirectories)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => new object[] { path });
 
@@ -225,7 +225,7 @@ public sealed class FlowValidateFixtureTests
     {
         foreach (var name in new[] { "3c363d117b40.action.json", "3c363d117b40-disabled.action.json" })
         {
-            var path = RepoPaths.Combine("autocheck", "fixtures", "manifests", name);
+            var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "manifests", name);
             var document = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!;
             var manifest = Course.Core.Actions.ActionManifest.FromDocument(document);
 
