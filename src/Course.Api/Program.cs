@@ -1,5 +1,6 @@
 using System.Text;
 using Course.Api.Endpoints;
+using Course.Api.Observability;
 using Course.Api.Middleware;
 using Course.Core.Actions;
 using Course.Core.OpenApi;
@@ -51,11 +52,9 @@ var app = builder.Build();
 
 app.UseMiddleware<ErrorEnvelopeMiddleware>();
 
-// Week 4, ticket 07: the three routes come from the one shared host every C#
-// process uses, so the bodies, the media types and the OpenMetrics rendering
-// cannot drift between `api` and the workers. `api` publishes no metric family
-// of its own yet -- the six required series arrive with the queue snapshot in
-// ticket 08 -- but the document is already a valid one.
+// Week 4, tickets 07 and 08: the three routes come from the one shared host every
+// C# process uses, so the bodies, the media types and the OpenMetrics rendering
+// cannot drift between `api` and the workers.
 //
 // PostgreSQL is the single readiness condition. There used to be a second one, an
 // "initialized" flag, but it was set unconditionally one line after it was
@@ -63,7 +62,27 @@ app.UseMiddleware<ErrorEnvelopeMiddleware>();
 // does not wait on schema or built-in publication (migrations and publication
 // happen in the separate bootstrap path). A condition that cannot fail is not a
 // condition.
-app.MapObservability(ObservabilityOptions.WithoutMetrics(PostgresReadiness.Probe(runtimeDataSource)));
+//
+// The six required series are one call to one registered function per scrape: the
+// values have to agree with each other, and a second query would be a second
+// snapshot. Bootstrap may not have applied migration 047 yet on a cold start, so a
+// failure to read the snapshot publishes an empty-but-valid document rather than
+// failing the scrape -- /metrics is not a readiness probe.
+var queueSnapshot = new PostgresQueueSnapshot(runtimeDataSource);
+
+app.MapObservability(new ObservabilityOptions(
+    PostgresReadiness.Probe(runtimeDataSource),
+    async cancellationToken =>
+    {
+        try
+        {
+            return QueueMetrics.From(await queueSnapshot.ReadAsync(cancellationToken));
+        }
+        catch (NpgsqlException)
+        {
+            return [];
+        }
+    }));
 
 app.MapGet("/openapi/default.json", OpenApiEndpoints.HandleDefaultAsync);
 app.MapGet("/openapi/actions/{module}/{action}/{version}.json", OpenApiEndpoints.HandleVersionAsync);
