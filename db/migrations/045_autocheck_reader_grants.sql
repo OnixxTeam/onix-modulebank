@@ -4,42 +4,44 @@
 -- reaches the postgres service and the migration runner (which runs as `cli`)
 -- never sees it. Its *grants* belong here, next to the views they apply to, so
 -- that a new autocheck view and its grant are versioned by the same runner.
---
--- RULE for every future migration that adds an autocheck view: grant SELECT on
--- it to autocheck_reader in that same migration. The blanket grant below only
--- covers views that exist when this migration runs; the default-privileges
--- statement covers views created *later by course_owner*, which is the runner's
--- own DDL role -- but a view created by any other role would still be invisible,
--- and the verifying run reads every view it knows about.
 grant usage on schema autocheck to autocheck_reader;
 grant select on all tables in schema autocheck to autocheck_reader;
 
+-- The blanket grant above only reaches views that exist right now, so the
+-- statement below carries the rule forward. It names `course_owner` because
+-- default privileges key on the role that *creates* the object: the runner
+-- connects as course_migrator but wraps every migration in `set local role
+-- course_owner` (PostgresMigrationRunner.ApplyOneFileAsync), so course_owner is
+-- the creating role. Naming course_migrator instead is not merely wrong, it is
+-- rejected outright -- course_owner may not set defaults for a role it is not a
+-- member of -- and naming a third role would apply cleanly and then silently
+-- never fire. AutocheckReaderRoleTests pins the behaviour rather than the name.
+--
+-- Migration 013's convention -- each new autocheck view grants SELECT to its
+-- reader in its own migration -- stays primary. This is the safety net under it,
+-- not a replacement, and AutocheckReaderRoleTests covers both.
 alter default privileges for role course_owner in schema autocheck
   grant select on tables to autocheck_reader;
 
 -- PostgreSQL grants EXECUTE on a new function to PUBLIC by default, and the
 -- verifying run rejects *any* EXECUTE the reader holds on an application
--- function. Individual migrations already revoke it function by function; this
--- is the schema-wide sweep that closes the ones they missed and makes the
--- property hold for the schemas as a whole rather than per file.
+-- function. Individual migrations already revoke it function by function, so this
+-- sweep changes nothing today -- verified by removing it and watching the reader
+-- still hold none. It is here so the property holds for the schemas as a whole
+-- rather than only per file.
 --
 -- `from public` only touches the PUBLIC pseudo-role: every explicit grant to
 -- course_runtime, workflow_worker, outbox_dispatcher, inbox_reconciler and
 -- course_publisher survives untouched.
+--
+-- There is deliberately no paired ALTER DEFAULT PRIVILEGES for functions. It
+-- would read as the obvious future-proofing, and on postgres:17 it does nothing:
+-- the REVOKE form records no row in pg_default_acl at all, and the GRANT form
+-- collapses back to the built-in default, so a function created afterwards still
+-- arrives with EXECUTE for PUBLIC (measured, not assumed). The standing guard for
+-- week 4's new functions is therefore a test --
+-- AutocheckReaderRoleTests.TheReaderCannotExecuteAnApplicationFunction fails the
+-- moment any function in these schemas forgets its own revoke.
 revoke execute on all functions in schema
   api, core, payment, operation, receipt, workflow, workflow_probe, delivery, migration
   from public;
-
--- Same reasoning for the future: a function added later by course_owner must
--- not arrive with EXECUTE already granted to PUBLIC.
-alter default privileges for role course_owner in schema
-  api, core, payment, operation, receipt, workflow, workflow_probe, delivery, migration
-  revoke execute on functions from public;
-
--- Belt and braces on the two database-level privileges the reader must not
--- have. `revoke all on database course from public` in the init script already
--- takes TEMP away from PUBLIC, and the reader is granted CONNECT only -- but
--- CONNECT is granted there by name, so stating the negative here keeps the
--- property in the versioned history rather than only in an init script that
--- never runs again on an existing volume.
-revoke create, temporary on database course from autocheck_reader;

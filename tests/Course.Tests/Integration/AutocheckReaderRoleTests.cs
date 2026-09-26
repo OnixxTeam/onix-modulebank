@@ -20,6 +20,10 @@ public sealed class AutocheckReaderRoleTests
 
     public AutocheckReaderRoleTests(ApiFactory factory) => this.factory = factory;
 
+    // The read-only property has to come from the role itself: the checker sets
+    // no session parameter of its own, it just connects and reads the setting
+    // back. A `set transaction read only` in some wrapper would satisfy this
+    // assertion and still leave every other connection writable.
     [Fact]
     public async Task TheReaderSessionIsTheReaderRoleAndIsReadOnly()
     {
@@ -29,10 +33,6 @@ public sealed class AutocheckReaderRoleTests
         Assert.Equal("on", await ScalarAsync<string>(connection, "select current_setting('transaction_read_only')"));
     }
 
-    // The read-only property has to come from the role itself: the checker sets
-    // no session parameter of its own, it just connects and reads the setting
-    // back. A `set transaction read only` in some wrapper would satisfy the
-    // assertion above and still leave every other connection writable.
     [Fact]
     public async Task EveryAutocheckViewIsReadable()
     {
@@ -49,16 +49,6 @@ public sealed class AutocheckReaderRoleTests
             await using var command = new NpgsqlCommand($"select count(*) from autocheck.{view}", connection);
             await command.ExecuteScalarAsync();
         }
-    }
-
-    [Fact]
-    public async Task WritingThroughAnAutocheckViewIsRejected()
-    {
-        await using var connection = await OpenAsReaderAsync();
-
-        await using var command = new NpgsqlCommand("delete from autocheck.operations", connection);
-
-        await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
     }
 
     [Fact]
@@ -146,8 +136,10 @@ public sealed class AutocheckReaderRoleTests
         Assert.Empty(privileges);
     }
 
-    // The checker tolerates USAGE on `public` (every role has it by default) and
-    // requires it on `autocheck`; any other application schema must stay closed.
+    // The checker exempts `public` and `autocheck` and requires every other
+    // application schema to stay closed. This solution is stricter than the
+    // exemption: `revoke all on schema public from public` in the init script
+    // means the reader holds no USAGE on `public` either.
     [Fact]
     public async Task TheReaderHasNoUsageOnAnUnrelatedSchema()
     {
@@ -237,6 +229,69 @@ public sealed class AutocheckReaderRoleTests
 
         Assert.Empty(functions);
     }
+
+    // Migration 013's convention is that each new autocheck view grants SELECT to
+    // its reader in its own migration. This proves the safety net under that
+    // convention actually fires: a view created the way a migration creates one
+    // -- as course_migrator, with no role elevation -- is readable without any
+    // grant of its own. Naming the wrong role in ALTER DEFAULT PRIVILEGES applies
+    // cleanly and then silently does nothing, which no other assertion here would
+    // catch.
+    [Fact]
+    public async Task AViewCreatedLaterByTheMigrationRunnerIsReadableWithoutItsOwnGrant()
+    {
+        await CreateAsMigrationsDoAsync("create view autocheck.default_privileges_probe as select 1 as probe");
+
+        try
+        {
+            await using var reader = await OpenAsReaderAsync();
+            await using var select = new NpgsqlCommand("select probe from autocheck.default_privileges_probe", reader);
+
+            Assert.Equal(1, await select.ExecuteScalarAsync());
+        }
+        finally
+        {
+            await CreateAsMigrationsDoAsync("drop view autocheck.default_privileges_probe");
+        }
+    }
+
+    [Theory]
+    [InlineData("insert into autocheck.operations (operation_id) values (pg_catalog.gen_random_uuid())")]
+    [InlineData("update autocheck.operations set status = 'COMPLETED'")]
+    [InlineData("delete from autocheck.operations")]
+    public async Task EveryWriteThroughAnAutocheckViewIsRejected(string statement)
+    {
+        await using var connection = await OpenAsReaderAsync();
+
+        await using var command = new NpgsqlCommand(statement, connection);
+
+        await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+    }
+
+    // An application function the reader must never be able to run, called for
+    // real rather than looked up: api.invoke is the one every HTTP action goes
+    // through, so a reader able to call it would be able to act, not just read.
+    [Fact]
+    public async Task CallingAnApplicationFunctionIsRejected()
+    {
+        await using var connection = await OpenAsReaderAsync();
+
+        await using var command = new NpgsqlCommand(
+            "select api.invoke('payment', 'request', 1, '{}'::jsonb, '{}'::jsonb)", connection);
+
+        await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteScalarAsync());
+    }
+
+    // Creates an object exactly the way a migration does: as course_migrator with
+    // `role course_owner` in force (PostgresMigrationRunner wraps every migration
+    // in `set local role course_owner`), which is what makes course_owner the
+    // creating role migration 045's default privileges name.
+    private Task<int> CreateAsMigrationsDoAsync(string statement) =>
+        factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(statement, connection);
+            return await command.ExecuteNonQueryAsync();
+        });
 
     private async Task<NpgsqlConnection> OpenAsReaderAsync()
     {
