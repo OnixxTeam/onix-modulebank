@@ -73,10 +73,9 @@ internal static class WorkerHost
 
         var app = builder.Build();
 
-        // PostgreSQL is this process's only critical dependency. The provider is
-        // deliberately not one: a provider outage shows up in the Outbox and in
-        // dispatcher metrics, and must not make a worker `not ready`.
-        app.MapObservability(ObservabilityOptions.ForDependency(PostgresReadiness.Probe(dataSource)));
+        // PostgreSQL is this process's only critical dependency (the rule itself is
+        // stated once, on ObservabilityOptions).
+        app.MapObservability(ObservabilityOptions.WithoutMetrics(PostgresReadiness.Probe(dataSource)));
 
         await app.RunAsync();
     }

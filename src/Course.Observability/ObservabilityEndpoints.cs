@@ -8,16 +8,19 @@ namespace Course.Observability;
 // What a process has to answer to be observable: whether it can serve a probe at
 // all, whether its critical dependency is there, and what its queues look like.
 //
-// Readiness is the process's own predicate, not a fixed PostgreSQL check: the
-// published contract gives `api`, both workers, both dispatchers and both
-// reconcilers PostgreSQL as their critical dependency and the receipt adapter the
-// gateway -- and gives *nobody* the provider, because a growing Outbox is a
-// normal mode, not an outage.
+// Readiness is the process's own predicate, not a fixed PostgreSQL check. The
+// published contract assigns each process one critical dependency -- PostgreSQL
+// for `api`, the workers, the dispatchers and the reconcilers, the gateway for the
+// receipt adapter -- and assigns the provider to nobody, because a growing Outbox
+// is a normal mode rather than an outage. This is the canonical statement of that
+// rule; the call sites do not repeat it.
 public sealed record ObservabilityOptions(
     Func<CancellationToken, Task<bool>> Readiness,
     Func<CancellationToken, Task<IReadOnlyList<MetricFamily>>> Metrics)
 {
-    public static ObservabilityOptions ForDependency(Func<CancellationToken, Task<bool>> readiness) =>
+    // For a process that publishes no metric family of its own: the document is
+    // still rendered, and still valid, just empty.
+    public static ObservabilityOptions WithoutMetrics(Func<CancellationToken, Task<bool>> readiness) =>
         new(readiness, _ => Task.FromResult<IReadOnlyList<MetricFamily>>([]));
 }
 
@@ -56,23 +59,42 @@ public static class ObservabilityEndpoints
 
 public static class PostgresReadiness
 {
+    // A hung PostgreSQL is not the same failure as a refused connection: without a
+    // deadline the probe would wait as long as the TCP stack does and the request
+    // would stall instead of answering. Readiness has to answer something, and the
+    // contract's answer for an absent dependency is 503, so the probe carries its
+    // own timeout.
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(2);
+
     // One connection per probe, taken from the pool and returned: readiness
     // recovers by itself once PostgreSQL comes back, with no state to reset after
     // a stop/start cycle.
-    public static Func<CancellationToken, Task<bool>> Probe(NpgsqlDataSource dataSource)
+    public static Func<CancellationToken, Task<bool>> Probe(NpgsqlDataSource dataSource, TimeSpan? timeout = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
+        var deadline = timeout ?? DefaultTimeout;
+
         return async cancellationToken =>
         {
+            using var timeoutSource = new CancellationTokenSource(deadline);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+
             try
             {
-                await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+                await using var connection = await dataSource.OpenConnectionAsync(linked.Token);
                 await using var command = new NpgsqlCommand("select 1", connection);
-                await command.ExecuteScalarAsync(cancellationToken);
+                await command.ExecuteScalarAsync(linked.Token);
                 return true;
             }
             catch (NpgsqlException)
+            {
+                return false;
+            }
+            // Our own deadline means "dependency unavailable". The caller's
+            // cancellation (the client gave up, the host is shutting down) is not a
+            // readiness answer at all, so it keeps propagating.
+            catch (OperationCanceledException) when (timeoutSource.IsCancellationRequested)
             {
                 return false;
             }

@@ -49,16 +49,38 @@ public static class OpenMetricsDocument
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
         RegexOptions.Compiled);
 
-    // The published list, in both spellings the contract names.
-    private static readonly HashSet<string> ForbiddenLabelNames = new(StringComparer.Ordinal)
-    {
+    // The published list. Both spellings the contract names are forbidden, and the
+    // camelCase half is derived rather than typed out twice: two hand-written
+    // halves are two chances to let them drift.
+    private static readonly HashSet<string> ForbiddenLabelNames = BuildForbiddenLabelNames(
+    [
         "correlation_id", "request_id", "operation_id", "process_id", "step_instance_id",
         "job_id", "execution_id", "attempt_id", "outbox_id", "external_request_id",
         "message_id", "decision_id",
-        "correlationId", "requestId", "operationId", "processId", "stepInstanceId",
-        "jobId", "executionId", "attemptId", "outboxId", "externalRequestId",
-        "messageId", "decisionId",
-    };
+    ]);
+
+    private static HashSet<string> BuildForbiddenLabelNames(IReadOnlyList<string> snakeCase)
+    {
+        var names = new HashSet<string>(snakeCase, StringComparer.Ordinal);
+
+        foreach (var name in snakeCase)
+        {
+            names.Add(ToCamelCase(name));
+        }
+
+        return names;
+    }
+
+    private static string ToCamelCase(string snakeCase)
+    {
+        var parts = snakeCase.Split('_');
+        return string.Concat(parts.Take(1).Concat(parts.Skip(1).Select(
+            part => string.Create(part.Length, part, (span, source) =>
+            {
+                source.AsSpan().CopyTo(span);
+                span[0] = char.ToUpperInvariant(span[0]);
+            }))));
+    }
 
     public static string Render(IReadOnlyList<MetricFamily> families)
     {
@@ -96,21 +118,23 @@ public static class OpenMetricsDocument
             throw new ArgumentException($"'{family.Name}' is not a valid metric family name", nameof(family));
         }
 
-        if (family.Type == MetricType.Counter && family.Name.EndsWith("_total", StringComparison.Ordinal))
+        var (keyword, sampleSuffix) = Declaration(family.Type);
+
+        if (sampleSuffix.Length > 0 && family.Name.EndsWith(sampleSuffix, StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                $"counter family '{family.Name}' must be declared without the _total suffix; the sample carries it",
+                $"{keyword} family '{family.Name}' must be declared without the {sampleSuffix} suffix; the sample carries it",
                 nameof(family));
         }
 
-        builder.Append("# TYPE ").Append(family.Name).Append(' ').Append(TypeName(family.Type)).Append('\n');
+        builder.Append("# TYPE ").Append(family.Name).Append(' ').Append(keyword).Append('\n');
 
         if (!string.IsNullOrEmpty(family.Help))
         {
             builder.Append("# HELP ").Append(family.Name).Append(' ').Append(SingleLine(family.Help)).Append('\n');
         }
 
-        var sampleName = family.Type == MetricType.Counter ? family.Name + "_total" : family.Name;
+        var sampleName = family.Name + sampleSuffix;
 
         foreach (var sample in family.Samples)
         {
@@ -185,10 +209,14 @@ public static class OpenMetricsDocument
         }
     }
 
-    private static string TypeName(MetricType type) => type switch
+    // One table, so the keyword a family declares and the suffix its sample carries
+    // cannot disagree: in OpenMetrics a counter is declared by family name and
+    // sampled with `_total`, and getting that pair backwards is the single most
+    // common way to fail a metrics contract.
+    private static (string Keyword, string SampleSuffix) Declaration(MetricType type) => type switch
     {
-        MetricType.Gauge => "gauge",
-        MetricType.Counter => "counter",
+        MetricType.Gauge => ("gauge", ""),
+        MetricType.Counter => ("counter", "_total"),
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "unknown metric type"),
     };
 
