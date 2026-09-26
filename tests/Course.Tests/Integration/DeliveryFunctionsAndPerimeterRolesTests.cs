@@ -254,6 +254,10 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
         Assert.InRange(actualLeaseMs, profileLeaseMs - 500, profileLeaseMs);
     }
 
+    // Called as course_publisher, the role bootstrap actually holds -- as the
+    // owner it would pass even without the schema USAGE grant EXECUTE alone
+    // does not imply, which is exactly how the first version of this shipped
+    // broken ("permission denied for schema delivery" on a clean boot).
     [Fact]
     public async Task SetLeaseMs_IsWhatTheProfileUsesOnTheNextClaim()
     {
@@ -262,11 +266,7 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
 
         try
         {
-            var applied = await factory.Postgres.QueryAsOwnerAsync(async connection =>
-            {
-                await using var command = new NpgsqlCommand("select delivery.set_lease_ms(2000)", connection);
-                return JsonNode.Parse((string)(await command.ExecuteScalarAsync())!)!;
-            });
+            var applied = await SetLeaseMsAsPublisherAsync(2000);
             Assert.Equal("ok", applied["status"]!.GetValue<string>());
 
             await ClaimAsDispatcherAsync("dispatcher-profile", 10);
@@ -278,13 +278,18 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
         }
         finally
         {
-            await factory.Postgres.QueryAsOwnerAsync(async connection =>
-            {
-                await using var command = new NpgsqlCommand("select delivery.set_lease_ms(@leaseMs)", connection);
-                command.Parameters.AddWithValue("leaseMs", original);
-                return (await command.ExecuteScalarAsync())!;
-            });
+            await SetLeaseMsAsPublisherAsync(original);
         }
+    }
+
+    private async Task<JsonNode> SetLeaseMsAsPublisherAsync(int leaseMs)
+    {
+        await using var connection = new NpgsqlConnection(factory.Postgres.PublisherConnectionString);
+        await connection.OpenAsync();
+
+        await using var command = new NpgsqlCommand("select delivery.set_lease_ms(@leaseMs)", connection);
+        command.Parameters.AddWithValue("leaseMs", leaseMs);
+        return JsonNode.Parse((string)(await command.ExecuteScalarAsync())!)!;
     }
 
     [Fact]
