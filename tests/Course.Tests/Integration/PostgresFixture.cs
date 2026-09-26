@@ -26,6 +26,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     private const string WorkerPassword = "test-worker-password";
     private const string OutboxPassword = "test-outbox-password";
     private const string InboxPassword = "test-inbox-password";
+    private const string AutocheckPassword = "test-autocheck-password";
     private const string SuperuserPassword = "test-superuser-password";
     private const string DatabaseName = "course";
 
@@ -39,6 +40,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("WORKFLOW_WORKER_PASSWORD", WorkerPassword)
         .WithEnvironment("COURSE_OUTBOX_PASSWORD", OutboxPassword)
         .WithEnvironment("COURSE_INBOX_PASSWORD", InboxPassword)
+        .WithEnvironment("COURSE_AUTOCHECK_PASSWORD", AutocheckPassword)
         .WithResourceMapping(
             new FileInfo(RepoPaths.Combine("db", "init", "00-roles.sh")),
             new FileInfo("/docker-entrypoint-initdb.d/00-roles.sh"))
@@ -53,6 +55,11 @@ public sealed class PostgresFixture : IAsyncLifetime
     public string OutboxDispatcherConnectionString => BuildConnectionString("outbox_dispatcher", OutboxPassword);
 
     public string InboxReconcilerConnectionString => BuildConnectionString("inbox_reconciler", InboxPassword);
+
+    // The week-4 checker's own read-only channel (ticket 01): every statement
+    // of its run is `psql -U autocheck_reader`, so the role is part of the
+    // verifiable surface, not test scaffolding.
+    public string AutocheckReaderConnectionString => BuildConnectionString("autocheck_reader", AutocheckPassword);
 
     public IActionPublisher Publisher { get; private set; } = null!;
 
