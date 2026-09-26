@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Course.Core\Course.Core.csproj" />
     <ProjectReference Include="..\Course.Infrastructure\Course.Infrastructure.csproj" />
+    <ProjectReference Include="..\Course.Observability\Course.Observability.csproj" />
   </ItemGroup>
 
 </Project>

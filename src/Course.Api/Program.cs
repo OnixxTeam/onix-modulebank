@@ -9,6 +9,7 @@ using Course.Infrastructure.OpenApi;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Security;
 using Course.Infrastructure.Validation;
+using Course.Observability;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -60,27 +61,19 @@ readiness.MarkInitialized();
 
 app.UseMiddleware<ErrorEnvelopeMiddleware>();
 
-app.MapGet("/health/live", () => Results.Ok());
+// Week 4, ticket 07: the three routes come from the one shared host every C#
+// process uses, so the bodies, the media types and the OpenMetrics rendering
+// cannot drift between `api` and the workers. `api` publishes no metric family
+// of its own yet -- the six required series arrive with the queue snapshot in
+// ticket 08 -- but the document is already a valid one.
+//
+// Readiness is both conditions: the host has finished building *and* PostgreSQL
+// answers. The provider is deliberately absent; a provider outage accumulates in
+// the Outbox and must not make `api` not ready.
+var postgresReady = PostgresReadiness.Probe(runtimeDataSource);
 
-app.MapGet("/health/ready", async (NpgsqlDataSource dataSource, CancellationToken cancellationToken) =>
-{
-    if (!readiness.IsInitialized)
-    {
-        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-    }
-
-    try
-    {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand("select 1", connection);
-        await command.ExecuteScalarAsync(cancellationToken);
-        return Results.Ok();
-    }
-    catch (NpgsqlException)
-    {
-        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-    }
-});
+app.MapObservability(ObservabilityOptions.ForDependency(
+    async cancellationToken => readiness.IsInitialized && await postgresReady(cancellationToken)));
 
 app.MapGet("/openapi/default.json", OpenApiEndpoints.HandleDefaultAsync);
 app.MapGet("/openapi/actions/{module}/{action}/{version}.json", OpenApiEndpoints.HandleVersionAsync);
