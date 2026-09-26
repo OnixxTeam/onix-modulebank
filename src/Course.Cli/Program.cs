@@ -36,7 +36,9 @@ try
                 flowPublisher: new PostgresWorkflowFlowPublisher(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 // Baked in by Course.Cli/Dockerfile (COPY db/maps -> /app/maps),
                 // same reasoning as migrationsDirectory/manifestsDirectory above.
-                flowMapsDirectory: "/app/maps");
+                flowMapsDirectory: "/app/maps",
+                deliveryProfile: new PostgresDeliveryProfile(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
+                outboxLeaseMs: OutboxLeaseMs());
             break;
         case "action validate":
             envelope = await ActionValidateCommand.ExecuteAsync(
@@ -135,6 +137,21 @@ catch (Exception ex)
     Console.Error.WriteLine(ex);
     Console.Out.Write(CliEnvelope.Fail("internal.error", "unexpected CLI failure").ToJson());
     return 1;
+}
+
+// COURSE_TEST_PROFILE=1 selects the 2-second test lease the checker's crash-
+// recovery scenario is timed against; anything else keeps the conservative
+// 30-second production lease. COURSE_OUTBOX_LEASE_MS overrides either one,
+// exactly as WORKFLOW_WORKER_LEASE_MS does for the job lease.
+static int OutboxLeaseMs()
+{
+    var raw = Environment.GetEnvironmentVariable("COURSE_OUTBOX_LEASE_MS");
+    if (!string.IsNullOrEmpty(raw))
+    {
+        return int.Parse(raw, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    return Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1" ? 2_000 : 30_000;
 }
 
 static WorkflowMapValidator BuildWorkflowMapValidator() => new(
