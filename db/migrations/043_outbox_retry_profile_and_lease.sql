@@ -49,12 +49,6 @@ end;
 $$;
 
 revoke all on function delivery.set_lease_ms(integer) from public;
--- USAGE on the schema as well as EXECUTE on the function: migration 039
--- granted delivery's schema usage to the two perimeter roles only, and
--- EXECUTE alone is not enough to resolve delivery.set_lease_ms. No table
--- privileges come with it -- course_publisher still cannot touch
--- delivery.outbox or delivery.retry_policy directly.
-grant usage on schema delivery to course_publisher;
 grant execute on function delivery.set_lease_ms(integer) to course_publisher;
 
 -- Migration 039's claim_outbox with one change: the lease interval is read

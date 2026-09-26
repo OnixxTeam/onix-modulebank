@@ -1,0 +1,16 @@
+-- Follow-up to migration 043, forward-only: 043 granted EXECUTE on
+-- delivery.set_lease_ms to course_publisher but not USAGE on the delivery
+-- schema itself, which migration 039 had given to the two perimeter roles
+-- only. EXECUTE alone cannot resolve a function whose schema the caller
+-- cannot use, so bootstrap failed its very first step on a clean boot with
+-- "permission denied for schema delivery" and never reached flow activation.
+--
+-- A separate migration rather than an edit to 043: the runner compares the
+-- checksum of every applied migration (PostgresMigrationRunner), so changing
+-- a file that has already been applied anywhere turns the next boot into a
+-- checksum conflict.
+--
+-- USAGE only. course_publisher still holds no privilege on delivery.outbox,
+-- delivery.inbox or delivery.retry_policy, and no EXECUTE on the claim/
+-- succeed/fail functions -- publishing does not get to move deliveries.
+grant usage on schema delivery to course_publisher;
