@@ -360,10 +360,10 @@ public sealed class FinishJobGraphTestFinishTests
     private static string NewOwner() => $"owner-{Guid.NewGuid():N}";
 
     private static string FixturePath(string fileName) =>
-        RepoPaths.Combine("autocheck", "fixtures", "maps", fileName);
+        RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", fileName);
 
     private static string ManifestPath(string fileName) =>
-        RepoPaths.Combine("autocheck", "fixtures", "manifests", fileName);
+        RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "manifests", fileName);
 
     // Reuses the same open-check probe action/map pair JobsLeaseClaimTests
     // publishes: its automatic step already carries two declared outcomes

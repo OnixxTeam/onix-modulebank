@@ -278,6 +278,17 @@ make e2e          # сквозной прогон обеих карт повер
 make ci           # dotnet format --verify-no-changes + build -warnaserror + test
 ```
 
+`./check.sh` запускает закреплённый открытый checker недели 3
+(`autocheck/`, `week-3-public-check/0.3`), поднимает полный стек из десяти
+сервисов на изолированном порту и пишет отчёт `week-3-public-report.json`.
+Ему нужен только Docker; аргумент `--repo` подставляется автоматически, явный
+`--repo PATH` по-прежнему имеет приоритет.
+
+Checkers прошлых недель заархивированы и остаются воспроизводимыми:
+`oldcheck/week2/check.sh` (`week-2-public-check/1.1`) и
+`oldcheck/week1/check.sh`. Они не запускаются `make check` — это проверки
+прошлых инкрементов, а не текущего.
+
 ### Диагностика
 
 - `make logs SERVICE=<gateway|api|postgres|cli|outbox-dispatcher|receipt-adapter|inbox-reconciler|provider-simulator>`
