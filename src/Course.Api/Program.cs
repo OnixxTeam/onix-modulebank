@@ -9,6 +9,7 @@ using Course.Infrastructure.OpenApi;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Security;
 using Course.Infrastructure.Validation;
+using Course.Observability;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -48,39 +49,21 @@ builder.Services.AddSingleton<ISignatureVerifier>(new ProviderSignatureVerifier(
 
 var app = builder.Build();
 
-// This process has no async startup work of its own and does not wait on schema or
-// built-in publication -- readiness flips as soon as the host has finished building,
-// distinct from (and required alongside) the "select 1" dependency check below.
-// Migrations/publication happen in the separate `bootstrap` service (compose
-// depends_on: postgres, not this container) or, for the checker's own fixtures,
-// through explicit `cli migration apply` / `cli action publish` calls -- neither is
-// a startup precondition for `api` itself.
-var readiness = new ReadinessState();
-readiness.MarkInitialized();
-
 app.UseMiddleware<ErrorEnvelopeMiddleware>();
 
-app.MapGet("/health/live", () => Results.Ok());
-
-app.MapGet("/health/ready", async (NpgsqlDataSource dataSource, CancellationToken cancellationToken) =>
-{
-    if (!readiness.IsInitialized)
-    {
-        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-    }
-
-    try
-    {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand("select 1", connection);
-        await command.ExecuteScalarAsync(cancellationToken);
-        return Results.Ok();
-    }
-    catch (NpgsqlException)
-    {
-        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-    }
-});
+// Week 4, ticket 07: the three routes come from the one shared host every C#
+// process uses, so the bodies, the media types and the OpenMetrics rendering
+// cannot drift between `api` and the workers. `api` publishes no metric family
+// of its own yet -- the six required series arrive with the queue snapshot in
+// ticket 08 -- but the document is already a valid one.
+//
+// PostgreSQL is the single readiness condition. There used to be a second one, an
+// "initialized" flag, but it was set unconditionally one line after it was
+// created, so it could never be false: this process has no async startup work and
+// does not wait on schema or built-in publication (migrations and publication
+// happen in the separate bootstrap path). A condition that cannot fail is not a
+// condition.
+app.MapObservability(ObservabilityOptions.WithoutMetrics(PostgresReadiness.Probe(runtimeDataSource)));
 
 app.MapGet("/openapi/default.json", OpenApiEndpoints.HandleDefaultAsync);
 app.MapGet("/openapi/actions/{module}/{action}/{version}.json", OpenApiEndpoints.HandleVersionAsync);
@@ -91,15 +74,6 @@ app.Run();
 
 static string RequireEnv(string name) =>
     Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"{name} is not set");
-
-internal sealed class ReadinessState
-{
-    private volatile bool isInitialized;
-
-    public bool IsInitialized => isInitialized;
-
-    public void MarkInitialized() => isInitialized = true;
-}
 
 // Top-level statements otherwise generate an internal Program class; WebApplicationFactory<Program>
 // (Integration/ApiFactory.cs) needs a public one to boot this app in-process for testing.
