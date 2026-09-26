@@ -7,10 +7,16 @@ x-course-db-env: &course-db-env
   COURSE_DB_HOST: postgres
   COURSE_DB_PORT: "5432"
   COURSE_DB_NAME: course
-  # Production default (unset -> long lease, slow poll). The verifying run's own
-  # override always pins this to "1" regardless of what is set here, and a tracked
-  # default of "1" would make the 2-second leases and 100 ms polls of the test
-  # profile the normal mode of an ordinary start.
+  # No tracked default. The verifying run pins this to "1" itself, and leaving it
+  # unset keeps the *process-level* fallbacks conservative for anything the six
+  # timing variables below do not cover.
+  #
+  # Those six do carry the test profile's own numbers as tracked defaults, which
+  # the published table explicitly allows and which the local end-to-end script
+  # depends on. So an ordinary `docker compose up` does run with 2-second leases:
+  # that is a deliberate choice for a teaching stand, not an accident, and the
+  # production numbers live in the code's own defaults for a deployment that
+  # overrides these variables instead.
   COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
   # Left out of this anchor deliberately: any *_PASSWORD default. Compose's
   # own `config` output keeps every x-prefixed anchor as a top-level field

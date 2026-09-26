@@ -100,6 +100,12 @@ public sealed class QueueMetricsTests
         try
         {
             Assert.Equal(before + 1, (await ScrapeAsync()).Samples["workflow_failures_total"]);
+
+            // Scraped again, because a counter that walked backwards between two
+            // scrapes is the failure this series is computed from stored state to
+            // avoid -- an in-memory counter would reset on the restart this week is
+            // built around.
+            Assert.Equal(before + 1, (await ScrapeAsync()).Samples["workflow_failures_total"]);
         }
         finally
         {

@@ -91,9 +91,9 @@ internal static class WorkerHost
     // COURSE_TEST_PROFILE=1 selects the test defaults (lease 2s, poll <=100ms);
     // anything else keeps the conservative production defaults (lease 30s, poll
     // 1s). COURSE_JOB_LEASE_MS and COURSE_WORKER_POLL_MS are the published names
-    // and override their own value regardless of profile; the older
-    // WORKFLOW_WORKER_LEASE_MS/_POLL_MS still work as aliases, because week 2's
-    // own tooling sets them.
+    // and override their own value regardless of profile. The older
+    // WORKFLOW_WORKER_LEASE_MS/_POLL_MS are kept as aliases for a local override
+    // written before week 4; nothing tracked in this repository sets them.
     private static IntervalProfile BuildIntervalProfile()
     {
         var testProfile = Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1";

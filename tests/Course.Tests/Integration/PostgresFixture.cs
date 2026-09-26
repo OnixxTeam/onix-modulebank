@@ -13,7 +13,7 @@ using Workflow.Core.Runtime;
 namespace Course.Tests.Integration;
 
 // Starts one isolated postgres:17-alpine container for the whole integration
-// test run (see AssemblyInfo.cs: parallelization is disabled so nothing else
+// test run, with both init scripts the image carries (see AssemblyInfo.cs: parallelization is disabled so nothing else
 // races this), runs the same role-creation script and checksummed migrations
 // bootstrap uses, publishes the real domain manifests plus the rollback-test
 // fixture actions, and exposes one connection string per application role --
@@ -41,9 +41,23 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("COURSE_OUTBOX_PASSWORD", OutboxPassword)
         .WithEnvironment("COURSE_INBOX_PASSWORD", InboxPassword)
         .WithEnvironment("COURSE_AUTOCHECK_PASSWORD", AutocheckPassword)
+        // The reliability profile, exactly as compose.yaml passes it: the second init
+        // script turns these into database-level settings, and mounting it is what
+        // puts that production channel under test at all -- a test that only sets
+        // session values proves the functions read *a* setting, not that the
+        // container ever produces one.
+        .WithEnvironment("COURSE_OUTBOX_MAX_ATTEMPTS", "4")
+        .WithEnvironment("COURSE_OUTBOX_BACKOFF_BASE_MS", "200")
+        .WithEnvironment("COURSE_OUTBOX_BACKOFF_MAX_MS", "800")
+        .WithEnvironment("COURSE_OUTBOX_JITTER_MAX_MS", "100")
+        .WithEnvironment("COURSE_OUTBOX_LEASE_MS", "2000")
+        .WithEnvironment("COURSE_JOB_LEASE_MS", "2000")
         .WithResourceMapping(
             new FileInfo(RepoPaths.Combine("db", "init", "00-roles.sh")),
             new FileInfo("/docker-entrypoint-initdb.d/00-roles.sh"))
+        .WithResourceMapping(
+            new FileInfo(RepoPaths.Combine("db", "init", "01-reliability-profile.sh")),
+            new FileInfo("/docker-entrypoint-initdb.d/01-reliability-profile.sh"))
         .Build();
 
     public string RuntimeConnectionString => BuildConnectionString("course_runtime", RuntimePassword);

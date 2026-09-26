@@ -65,9 +65,13 @@ app.UseMiddleware<ErrorEnvelopeMiddleware>();
 //
 // The six required series are one call to one registered function per scrape: the
 // values have to agree with each other, and a second query would be a second
-// snapshot. Bootstrap may not have applied migration 047 yet on a cold start, so a
-// failure to read the snapshot publishes an empty-but-valid document rather than
-// failing the scrape -- /metrics is not a readiness probe.
+// snapshot.
+//
+// The one tolerated failure is "the snapshot function is not there yet": on a cold
+// start bootstrap may not have applied migration 047, and an empty-but-valid
+// document is a better answer than a failed scrape. Every other database error
+// propagates, because a scrape that silently publishes none of the six required
+// series is indistinguishable from a healthy empty queue.
 var queueSnapshot = new PostgresQueueSnapshot(runtimeDataSource);
 
 app.MapObservability(new ObservabilityOptions(
@@ -78,7 +82,10 @@ app.MapObservability(new ObservabilityOptions(
         {
             return QueueMetrics.From(await queueSnapshot.ReadAsync(cancellationToken));
         }
-        catch (NpgsqlException)
+        catch (PostgresException error) when (
+            error.SqlState is PostgresErrorCodes.UndefinedFunction
+                or PostgresErrorCodes.InvalidSchemaName
+                or PostgresErrorCodes.UndefinedTable)
         {
             return [];
         }
