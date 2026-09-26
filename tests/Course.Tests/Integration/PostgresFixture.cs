@@ -37,7 +37,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("COURSE_MIGRATOR_PASSWORD", MigratorPassword)
         .WithEnvironment("COURSE_PUBLISHER_PASSWORD", PublisherPassword)
         .WithEnvironment("COURSE_RUNTIME_PASSWORD", RuntimePassword)
-        .WithEnvironment("WORKFLOW_WORKER_PASSWORD", WorkerPassword)
+        .WithEnvironment("COURSE_WORKER_PASSWORD", WorkerPassword)
         .WithEnvironment("COURSE_OUTBOX_PASSWORD", OutboxPassword)
         .WithEnvironment("COURSE_INBOX_PASSWORD", InboxPassword)
         .WithEnvironment("COURSE_AUTOCHECK_PASSWORD", AutocheckPassword)
