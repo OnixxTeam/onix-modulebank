@@ -114,6 +114,47 @@ public sealed class FinalOperationEventsTests : IDisposable
         Assert.Equal(0, await EventCountAsync(operationId, "OPERATION_COMPLETED"));
     }
 
+    // The status update and the event insert happen in the caller's own
+    // transaction, so a technical failure after the call undoes both or
+    // neither -- a rolled-back attempt must leave no half-written history
+    // behind.
+    [Fact]
+    public async Task RolledBackTerminalCall_LeavesNeitherTheStatusNorTheHistoryChanged()
+    {
+        var (operationId, _) = await SubmitApprovalAsync("150000.00");
+        await DrainAsync(CreateLoop()); // validate, check_limit -> WAITING_MANUAL
+
+        var statusInsideTransaction = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var transaction = await connection.BeginTransactionAsync();
+
+            await using var call = new NpgsqlCommand("select payment.reject_v1(@context, @payload)", connection, transaction);
+            call.Parameters.Add(new NpgsqlParameter("context", NpgsqlDbType.Jsonb) { Value = "{}" });
+            call.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb)
+            {
+                Value = new JsonObject { ["operationId"] = operationId.ToString() }.ToJsonString(),
+            });
+            var envelope = JsonNode.Parse((string)(await call.ExecuteScalarAsync())!)!;
+            Assert.Equal("ok", envelope["status"]!.GetValue<string>());
+
+            await using var read = new NpgsqlCommand(
+                "select status from core.operations where operation_id = @id", connection, transaction);
+            read.Parameters.AddWithValue("id", operationId);
+            var status = (string)(await read.ExecuteScalarAsync())!;
+
+            await transaction.RollbackAsync();
+            return status;
+        });
+
+        // The uncommitted transaction really did reach the terminal write --
+        // otherwise this test would pass for the wrong reason.
+        Assert.Equal("REJECTED", statusInsideTransaction);
+
+        Assert.Equal("PROCESSING", await StatusAsync(operationId));
+        Assert.Equal(0, await EventCountAsync(operationId, "OPERATION_REJECTED"));
+        Assert.Equal(0, await EventCountAsync(operationId, "OPERATION_COMPLETED"));
+    }
+
     [Fact]
     public async Task UnknownOperation_WritesNoEventAtAll()
     {
