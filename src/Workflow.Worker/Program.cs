@@ -49,6 +49,17 @@ internal static class WorkerHost
         var actionExecutor = new PostgresActionExecutor(dataSource, schemaValidator, TimeProvider.System);
         var jobRuntime = new PostgresWorkflowJobRuntime(connectionString);
 
+        // The host's own logger, not the default NullLogger: without this argument the
+        // structured step line (ticket 10) exists only in tests, and the claim-failure
+        // line disappears entirely. Built before app.Build() because the loop is
+        // constructed here, so it comes from a throwaway factory that shares this
+        // process's logging configuration.
+        using var loggerFactory = LoggerFactory.Create(logging =>
+        {
+            logging.AddJsonConsole();
+            logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        });
+
         var loop = new WorkerLoop(
             owner,
             dataSource,
@@ -58,7 +69,8 @@ internal static class WorkerHost
             TimeProvider.System,
             intervals,
             WorkerScopes(),
-            failpoints);
+            failpoints,
+            loggerFactory.CreateLogger<WorkerLoop>());
 
         // The data source is registered so the host disposes it on shutdown, which
         // is what the previous `await using` did.

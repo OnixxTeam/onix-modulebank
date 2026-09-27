@@ -19,6 +19,7 @@ import psycopg
 
 from perimeter import db
 from perimeter.config import InvalidConfigError, MissingConfigError, ReconcilerConfig, load_reconciler_config
+from perimeter.logs import configure as configure_logging
 from perimeter.observability import Counters, Family, create_observability_app, serve_in_background
 from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
 
@@ -53,14 +54,19 @@ def run(config: ReconcilerConfig) -> None:
     shutdown = ShutdownFlag()
     shutdown.install()
 
+    # Started before the first connection attempt on purpose: liveness must not
+    # depend on PostgreSQL, and a process that dies while connecting answers no
+    # probe at all. Readiness is what reports the database, and it reports it as
+    # not ready until the connection succeeds.
+    serve_in_background(
+        create_observability_app(readiness=postgres_reachable, metrics=metric_families),
+        port=OBSERVABILITY_PORT,
+    )
+
     with psycopg.connect(autocommit=True) as conn:
         # PostgreSQL is this process's only critical dependency, same as the
         # dispatcher's; none of the six published failpoints is reached here, and the
         # gate's own semantics cover that (an unmatched name is a no-op).
-        serve_in_background(
-            create_observability_app(readiness=postgres_reachable, metrics=metric_families),
-            port=OBSERVABILITY_PORT,
-        )
 
         while not shutdown.requested:
             try:
@@ -83,7 +89,7 @@ def run(config: ReconcilerConfig) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         config = load_reconciler_config()

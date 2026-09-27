@@ -5,6 +5,8 @@ using Course.Core.Context;
 using Course.Core.Errors;
 using Course.Core.Validation;
 using Course.Infrastructure.Postgres;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 using Workflow.Core.Runtime;
@@ -81,7 +83,7 @@ public sealed record WorkerStepResult(WorkerStepOutcome Outcome, string? ErrorCo
 // (ticket 10). Carries no map, step or action name of its own: every branch
 // below reads from the claimed job's own JSON, never from a literal drawn from
 // a specific flow.
-public sealed class WorkerLoop(
+public sealed partial class WorkerLoop(
     string owner,
     NpgsqlDataSource dataSource,
     IWorkflowJobRuntime jobRuntime,
@@ -90,9 +92,14 @@ public sealed class WorkerLoop(
     TimeProvider clock,
     IntervalProfile intervals,
     IReadOnlyList<string> scopes,
-    IFailpointGate? failpoints = null)
+    IFailpointGate? failpoints = null,
+    ILogger<WorkerLoop>? logger = null)
 {
     private readonly IFailpointGate failpointGate = failpoints ?? NoopFailpointGate.Instance;
+
+    // NullLogger by default so every existing caller -- and every test written
+    // before week 4 -- keeps compiling and running unchanged.
+    private readonly ILogger<WorkerLoop> log = logger ?? NullLogger<WorkerLoop>.Instance;
 
     public async Task<WorkerStepResult> RunOnceAsync(CancellationToken cancellationToken)
     {
@@ -109,7 +116,7 @@ public sealed class WorkerLoop(
         // to propagate rather than swallowed as a claim failure.
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            Console.Error.WriteLine($"[{owner}] job claim failed, will retry: {exception.Message}");
+            LogClaimFailed(log, owner, exception.GetType().Name, exception.Message);
             return WorkerStepResult.ClaimFailed;
         }
 
@@ -153,6 +160,27 @@ public sealed class WorkerLoop(
         var processId = Guid.Parse(job["process"]!["processId"]!.GetValue<string>());
         var timeoutMs = task["timeoutMs"]!.GetValue<int>();
 
+        // Week 4, ticket 10: one structured line per attempt needs the flow, its
+        // version and the step key by name. Migration 050 sends all three with the
+        // claim; the null-tolerant reads keep an older claim payload working rather
+        // than turning a logging concern into a claim failure.
+        var step = new StepIdentity(
+            Owner: owner,
+            CorrelationId: Guid.NewGuid(),
+            ProcessId: processId,
+            FlowName: job["flowName"]?.GetValue<string>() ?? "",
+            FlowVersion: job["flowVersion"]?.GetValue<int>() ?? 0,
+            StepKey: job["stepKey"]?.GetValue<string>() ?? "",
+            JobId: jobId,
+            ExecutionId: executionId,
+            AttemptId: attemptId,
+            LeaseVersion: leaseVersion,
+            Module: task["module"]!.GetValue<string>(),
+            Action: task["action"]!.GetValue<string>(),
+            ActionVersion: task["actionVersion"]!.GetValue<int>());
+
+        var started = clock.GetTimestamp();
+
         var inputConstants = task["inputConstants"]!.AsObject();
         var inputMapping = task["inputMapping"]!.AsObject()
             .ToDictionary(pair => pair.Key, pair => pair.Value!.GetValue<string>(), StringComparer.Ordinal);
@@ -167,6 +195,7 @@ public sealed class WorkerLoop(
         if (!mapping.IsSuccess)
         {
             await jobRuntime.FailAsync(jobId, owner, leaseVersion, WorkflowErrorCodes.MappingMissing, retryable: false, cancellationToken);
+            LogStep(step, started, outcome: null, WorkflowErrorCodes.MappingMissing);
             return WorkerStepResult.MappingMissing;
         }
 
@@ -174,6 +203,7 @@ public sealed class WorkerLoop(
         if (!validator.Validate(requestSchema, mapping.Payload!).IsValid)
         {
             await jobRuntime.FailAsync(jobId, owner, leaseVersion, WorkflowErrorCodes.RequestInvalid, retryable: false, cancellationToken);
+            LogStep(step, started, outcome: null, WorkflowErrorCodes.RequestInvalid);
             return WorkerStepResult.RequestInvalid;
         }
 
@@ -206,7 +236,7 @@ public sealed class WorkerLoop(
                 task["action"]!.GetValue<string>(),
                 task["actionVersion"]!.GetValue<int>(),
                 claims,
-                correlationId: Guid.NewGuid(),
+                correlationId: step.CorrelationId,
                 requestId: executionId,
                 mapping.Payload!,
                 callerContext,
@@ -235,6 +265,7 @@ public sealed class WorkerLoop(
         if (actionError is not null)
         {
             await RollbackAndFailAsync(transaction, jobId, leaseVersion, actionError.Code, actionError.Retryable, cancellationToken);
+            LogStep(step, started, outcome: null, actionError.Code);
             return new WorkerStepResult(WorkerStepOutcome.ActionRejected, actionError.Code);
         }
 
@@ -262,10 +293,12 @@ public sealed class WorkerLoop(
                 await RollbackAndFailAsync(transaction, jobId, leaseVersion, code, retryable: false, cancellationToken);
             }
 
+            LogStep(step, started, outcome: null, code);
             return new WorkerStepResult(WorkerStepOutcome.FinishRejected, code);
         }
 
         await transaction.CommitAsync(cancellationToken);
+        LogStep(step, started, pipelineOutcome.Result.Outcome, errorCode: null);
         return WorkerStepResult.Succeeded;
     }
 
@@ -282,6 +315,77 @@ public sealed class WorkerLoop(
         await transaction.RollbackAsync(cancellationToken);
         await jobRuntime.FailAsync(jobId, owner, leaseVersion, errorCode, retryable, cancellationToken);
     }
+
+    private void LogStep(StepIdentity step, long started, string? outcome, string? errorCode)
+    {
+        // The duration is measured only if the line will actually be written; the
+        // analyzer is right that computing an argument for a disabled log is waste.
+        if (!log.IsEnabled(LogLevel.Information))
+        {
+            return;
+        }
+
+        var durationMs = (long)clock.GetElapsedTime(started).TotalMilliseconds;
+
+        LogStepFinished(
+            log,
+            step.Owner,
+            step.CorrelationId,
+            step.ProcessId,
+            step.FlowName,
+            step.FlowVersion,
+            step.StepKey,
+            step.JobId,
+            step.ExecutionId,
+            step.AttemptId,
+            step.LeaseVersion,
+            step.Module,
+            step.Action,
+            step.ActionVersion,
+            outcome,
+            errorCode,
+            durationMs);
+    }
+
+    // One line per finished attempt, carrying every identifier the published log
+    // contract asks for and nothing else: no payload, no result, no secret. The
+    // error code is the safe dotted identifier the runtime already returns, and
+    // outcome and errorCode are mutually exclusive by construction.
+    [LoggerMessage(
+        Level = LogLevel.Information,
+        Message = "step finished owner={Owner} correlationId={CorrelationId} processId={ProcessId} "
+            + "flow={FlowName} flowVersion={FlowVersion} stepKey={StepKey} jobId={JobId} "
+            + "executionId={ExecutionId} attemptId={AttemptId} leaseVersion={LeaseVersion} "
+            + "action={Module}.{Action} actionVersion={ActionVersion} outcome={Outcome} "
+            + "errorCode={ErrorCode} duration_ms={DurationMs}")]
+    private static partial void LogStepFinished(
+        ILogger logger, string owner, Guid correlationId, Guid processId, string flowName, int flowVersion,
+        string stepKey, Guid jobId, string executionId, Guid attemptId, int leaseVersion, string module,
+        string action, int actionVersion, string? outcome, string? errorCode, long durationMs);
+
+    // A claim that failed has no job to name yet, so it carries what it has: which
+    // worker, and the failure by type and message. No connection string, and no
+    // password: the message of an Npgsql failure names the host and the role, never
+    // the credential.
+    [LoggerMessage(
+        Level = LogLevel.Error,
+        Message = "job claim failed, will retry owner={Owner} error={Error} errorMessage={ErrorMessage}")]
+    private static partial void LogClaimFailed(ILogger logger, string owner, string error, string errorMessage);
+
+    private sealed record StepIdentity(
+        string Owner,
+        Guid CorrelationId,
+        Guid ProcessId,
+        string FlowName,
+        int FlowVersion,
+        string StepKey,
+        Guid JobId,
+        string ExecutionId,
+        Guid AttemptId,
+        int LeaseVersion,
+        string Module,
+        string Action,
+        int ActionVersion);
 
     private static async Task<JsonNode> FinishAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, Guid jobId, string owner, int leaseVersion, string outcome,

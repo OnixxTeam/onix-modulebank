@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from perimeter.callback import parse_callback
 from perimeter.config import AdapterConfig, InvalidConfigError, MissingConfigError, load_adapter_config
+from perimeter.logs import configure as configure_logging
 from perimeter.observability import Counters, Family, mount_observability
 from perimeter.receipt import build_receipt_bytes
 from perimeter.signature import sign_hex
@@ -150,7 +151,7 @@ def create_app(config: AdapterConfig, client: httpx.Client) -> FastAPI:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         config = load_adapter_config()
@@ -160,7 +161,9 @@ def main() -> None:
 
     with httpx.Client(follow_redirects=False) as client:
         app = create_app(config, client)
-        uvicorn.run(app, host="0.0.0.0", port=8082)
+        # log_config=None: see serve_in_background -- uvicorn would otherwise replace
+        # the JSON log handler with its own plain-text one.
+        uvicorn.run(app, host="0.0.0.0", port=8082, log_config=None)
 
 
 if __name__ == "__main__":
