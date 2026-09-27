@@ -296,6 +296,84 @@ public sealed class FinishJobGraphTestFinishTests
         Assert.Contains("\"status\":\"ok\"", finishedRaw.Replace(" ", ""));
     }
 
+    // Week 4, ticket 03: `flow test-finish` used to connect as workflow_worker, and
+    // the published secret-distribution rule allows that role's password in
+    // postgres, worker-a and worker-b only -- so cli lost it in ticket 02 and the
+    // probe lost its connection. What the probe actually needs is a call to the
+    // production finish boundary, not that particular role, so it connects as
+    // course_publisher with an explicit grant on that one function. Both outcomes
+    // the probe exists to show are proven here through that role.
+    [Fact]
+    public async Task PublisherRole_CanCallFinishJob_ForTheFencingProbe()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateProbeFlowAsync(flowName);
+        await DrainClaimableJobsAsync();
+        await StartProcessAsync(flowName);
+
+        await using var worker = new NpgsqlConnection(factory.Postgres.WorkerConnectionString);
+        await worker.OpenAsync();
+
+        var owner = NewOwner();
+        await using var claim = new NpgsqlCommand("select workflow.claim_jobs(@owner, 5000)", worker);
+        claim.Parameters.AddWithValue("owner", owner);
+        var claimed = JsonNode.Parse((string)(await claim.ExecuteScalarAsync())!)!;
+        var job = claimed["job"]!;
+
+        await using var publisher = new NpgsqlConnection(factory.Postgres.PublisherConnectionString);
+        await publisher.OpenAsync();
+
+        var finished = await FinishAsync(
+            publisher,
+            Guid.Parse(job["jobId"]!.GetValue<string>()),
+            owner,
+            job["leaseVersion"]!.GetValue<int>());
+
+        Assert.Contains("\"status\":\"ok\"", finished.Replace(" ", ""), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublisherRole_StaleFinishIsStillRejected_ForTheFencingProbe()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateProbeFlowAsync(flowName);
+        await DrainClaimableJobsAsync();
+        await StartProcessAsync(flowName);
+
+        await using var worker = new NpgsqlConnection(factory.Postgres.WorkerConnectionString);
+        await worker.OpenAsync();
+
+        var owner = NewOwner();
+        await using var claim = new NpgsqlCommand("select workflow.claim_jobs(@owner, 5000)", worker);
+        claim.Parameters.AddWithValue("owner", owner);
+        var claimed = JsonNode.Parse((string)(await claim.ExecuteScalarAsync())!)!;
+        var job = claimed["job"]!;
+        var jobId = Guid.Parse(job["jobId"]!.GetValue<string>());
+
+        await using var publisher = new NpgsqlConnection(factory.Postgres.PublisherConnectionString);
+        await publisher.OpenAsync();
+
+        // One lease version behind: the owner came back after losing the lease.
+        var stale = await FinishAsync(publisher, jobId, owner, job["leaseVersion"]!.GetValue<int>() - 1);
+
+        Assert.Contains("workflow.lease_stale", stale, StringComparison.Ordinal);
+        await AssertJobUntouchedAsync(jobId, "LEASED");
+    }
+
+    private static async Task<string> FinishAsync(
+        NpgsqlConnection connection, Guid jobId, string owner, int leaseVersion)
+    {
+        await using var finish = new NpgsqlCommand(
+            "select workflow.finish_job(@jobId, @owner, @leaseVersion, @outcome, @result)", connection);
+        finish.Parameters.AddWithValue("jobId", jobId);
+        finish.Parameters.AddWithValue("owner", owner);
+        finish.Parameters.AddWithValue("leaseVersion", leaseVersion);
+        finish.Parameters.AddWithValue("outcome", "ROUTE_SIGNAL_72125C4E");
+        finish.Parameters.Add(new NpgsqlParameter("result", NpgsqlTypes.NpgsqlDbType.Jsonb) { Value = "{}" });
+
+        return (string)(await finish.ExecuteScalarAsync())!;
+    }
+
     private string LastClaimOwner { get; set; } = "";
 
     // The container (and its workflow_job table) is shared by every test in

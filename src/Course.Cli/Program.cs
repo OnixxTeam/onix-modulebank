@@ -113,7 +113,12 @@ try
         case "flow test-finish":
             envelope = await FlowTestFinishCommand.ExecuteAsync(
                 parsed,
-                new PostgresWorkflowJobRuntime(BuildConnectionString("workflow_worker", "WORKFLOW_WORKER_PASSWORD")),
+                // course_publisher, not workflow_worker: the probe needs a call to the
+                // production finish boundary, and the worker password is confined to
+                // postgres/worker-a/worker-b by the published distribution rule.
+                // Migration 046 grants EXECUTE on workflow.finish_job to this role and
+                // nothing else -- the function's own fencing check still decides.
+                new PostgresWorkflowJobRuntime(BuildConnectionString("course_publisher", "COURSE_PUBLISHER_PASSWORD")),
                 Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1",
                 CancellationToken.None);
             break;

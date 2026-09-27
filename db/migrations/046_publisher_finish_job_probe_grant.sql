@@ -1,0 +1,21 @@
+-- Week 4, ticket 03: the fencing probe (`cli flow test-finish`) gets its own way
+-- into the production finish boundary.
+--
+-- The probe exists to show two things a real worker cannot be asked to
+-- demonstrate on command: a finish under a live lease is accepted, and a finish
+-- one lease version behind is rejected with workflow.lease_stale while the job row
+-- stays untouched. Until now it connected as workflow_worker, which the published
+-- secret-distribution rule confines to postgres, worker-a and worker-b -- so
+-- ticket 02 took that password away from `cli` and the probe lost its connection.
+--
+-- What the probe needs is the call, not the role. course_publisher already holds
+-- USAGE on schema workflow (migration 020) and is the role `cli` uses for every
+-- other publishing command, so one EXECUTE grant on this one function is the whole
+-- change. finish_job is SECURITY DEFINER, so the grant hands over no privilege on
+-- any table: the function's own fencing check (owner plus lease version) still
+-- decides the outcome, and a publisher calling it with a stale lease version is
+-- rejected exactly like a worker would be.
+--
+-- Deliberately narrow: no grant on claim_jobs, fail_job or any workflow table.
+-- Publishing does not get to take work, only to finish a job it can already name.
+grant execute on function workflow.finish_job(uuid, text, integer, text, jsonb) to course_publisher;
