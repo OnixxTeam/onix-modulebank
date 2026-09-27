@@ -19,6 +19,7 @@ import psycopg
 from perimeter import db
 from perimeter.classify import ClassificationResult, Retry, Success, Terminal, classify_http_response, classify_transport_failure
 from perimeter.config import DispatcherConfig, InvalidConfigError, MissingConfigError, load_dispatcher_config
+from perimeter.logs import configure as configure_logging
 from perimeter.observability import Counters, Family, create_observability_app, serve_in_background
 from perimeter.request import build_provider_request
 from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
@@ -149,7 +150,7 @@ def postgres_reachable() -> bool:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         config = load_dispatcher_config()

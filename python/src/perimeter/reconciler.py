@@ -19,6 +19,7 @@ import psycopg
 
 from perimeter import db
 from perimeter.config import InvalidConfigError, MissingConfigError, ReconcilerConfig, load_reconciler_config
+from perimeter.logs import configure as configure_logging
 from perimeter.observability import Counters, Family, create_observability_app, serve_in_background
 from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
 
@@ -83,7 +84,7 @@ def run(config: ReconcilerConfig) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         config = load_reconciler_config()

@@ -227,7 +227,12 @@ def serve_in_background(app: FastAPI, port: int) -> threading.Thread:
     A daemon thread on purpose: when the loop exits on SIGTERM the process should
     end, not linger because a server thread is still accepting probes.
     """
-    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning"))
+    # log_config=None is load-bearing: uvicorn installs its own dictConfig when a
+    # server starts, which replaces the JSON handler perimeter.logs put on the root
+    # logger and turns its own startup lines back into plain text.
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", log_config=None)
+    )
     thread = threading.Thread(target=server.run, name="observability", daemon=True)
     thread.start()
     return thread
