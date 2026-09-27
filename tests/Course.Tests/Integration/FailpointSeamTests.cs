@@ -48,13 +48,13 @@ public sealed class FailpointSeamTests : IDisposable
     public async Task AnUnknownNameDisarmsEveryBoundary()
     {
         var output = new StringWriter();
-        var gate = new FailpointGate("after_everything_explodes", output);
+        var gate = new FailpointGate("after_everything_explodes", "api", output);
 
         // Would block forever if it were armed; the token is only insurance.
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         foreach (var name in Failpoints.Names)
         {
-            await gate.ReachAsync(name, "api", cancellation.Token);
+            await gate.ReachAsync(name, cancellation.Token);
         }
 
         Assert.Equal(string.Empty, output.ToString());
@@ -64,17 +64,17 @@ public sealed class FailpointSeamTests : IDisposable
     public async Task OnlyTheOneArmedNameFires()
     {
         var output = new StringWriter();
-        var gate = new FailpointGate(Failpoints.AfterInboxSaved, output);
+        var gate = new FailpointGate(Failpoints.AfterInboxSaved, "api", output);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         foreach (var name in Failpoints.Names.Where(name => name != Failpoints.AfterInboxSaved))
         {
-            await gate.ReachAsync(name, "api", cancellation.Token);
+            await gate.ReachAsync(name, cancellation.Token);
         }
 
         Assert.Equal(string.Empty, output.ToString());
 
-        var reached = gate.ReachAsync(Failpoints.AfterInboxSaved, "api", cancellation.Token);
+        var reached = gate.ReachAsync(Failpoints.AfterInboxSaved, cancellation.Token);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
         {
             await Task.Delay(-1, cancellation.Token);
@@ -101,7 +101,7 @@ public sealed class FailpointSeamTests : IDisposable
     {
         using var scope = new EnvironmentScope(("COURSE_TEST_PROFILE", profile), ("COURSE_FAILPOINT", armed));
 
-        Assert.Same(NoopFailpointGate.Instance, Failpoints.FromEnvironment(new StringWriter()));
+        Assert.Same(NoopFailpointGate.Instance, Failpoints.FromEnvironment("api", new StringWriter()));
     }
 
     [Fact]
@@ -109,7 +109,7 @@ public sealed class FailpointSeamTests : IDisposable
     {
         using var scope = new EnvironmentScope(("COURSE_TEST_PROFILE", "1"), ("COURSE_FAILPOINT", "after_manual_decision"));
 
-        Assert.IsType<FailpointGate>(Failpoints.FromEnvironment(new StringWriter()));
+        Assert.IsType<FailpointGate>(Failpoints.FromEnvironment("api", new StringWriter()));
     }
 
     // The pre-commit boundary. Stopping here must lose the effect, the dispatch
@@ -129,8 +129,7 @@ public sealed class FailpointSeamTests : IDisposable
             runtimeDataSource,
             factory.Services.GetRequiredService<ISchemaValidator>(),
             TimeProvider.System,
-            new FailpointGate(Failpoints.AfterManualDecision, output),
-            "api");
+            new FailpointGate(Failpoints.AfterManualDecision, "api", output));
 
         var blocked = executor.ExecuteAsync(
             "workflow", "probe", null, Claims(), Guid.NewGuid(), key, payload.DeepClone(), cancellation.Token);
@@ -170,8 +169,7 @@ public sealed class FailpointSeamTests : IDisposable
             runtimeDataSource,
             factory.Services.GetRequiredService<ISchemaValidator>(),
             TimeProvider.System,
-            new FailpointGate(Failpoints.AfterInboxSaved, output),
-            "api");
+            new FailpointGate(Failpoints.AfterInboxSaved, "api", output));
 
         var blocked = executor.ExecuteAsync(
             "workflow", "probe", null, Claims(), Guid.NewGuid(), key, payload.DeepClone(), cancellation.Token);

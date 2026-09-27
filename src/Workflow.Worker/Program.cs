@@ -38,7 +38,7 @@ internal static class WorkerHost
         var owner = RequireEnv("WORKFLOW_WORKER_OWNER");
         var connectionString = BuildConnectionString();
         var intervals = BuildIntervalProfile();
-        var failpoints = Failpoints.FromEnvironment(Console.Out);
+        var failpoints = Failpoints.FromEnvironment(owner, Console.Out);
 
         // One JsonSchemaValidator for the whole process: a second instance compiling
         // the same catalog schema text (the loop's pre-check and the executor's own
@@ -47,7 +47,11 @@ internal static class WorkerHost
         var schemaValidator = new JsonSchemaValidator();
 
         var dataSource = NpgsqlDataSource.Create(connectionString);
-        var actionExecutor = new PostgresActionExecutor(dataSource, schemaValidator, TimeProvider.System);
+        // Explicitly no gate: this process's own two failpoints are on WorkerLoop,
+        // and the loop drives ExecuteInTransactionAsync, never ExecuteAsync -- so the
+        // two boundaries the executor owns are unreachable from here by construction.
+        var actionExecutor = new PostgresActionExecutor(
+            dataSource, schemaValidator, TimeProvider.System, NoopFailpointGate.Instance);
         var jobRuntime = new PostgresWorkflowJobRuntime(connectionString);
 
         // The host's own logger, not the default NullLogger: without this argument the

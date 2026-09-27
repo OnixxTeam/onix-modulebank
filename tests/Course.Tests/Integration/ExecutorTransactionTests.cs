@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
 using Course.Core.Context;
+using Course.Core.Diagnostics;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Validation;
 using Npgsql;
@@ -177,5 +178,5 @@ public sealed class ExecutorTransactionTests(ApiFactory factory)
     // these tests validate against (GenericObjectSchema) declares no $id, so a
     // second validator instance never collides with the app host's registrations.
     private static PostgresActionExecutor CreateExecutor(NpgsqlDataSource dataSource) =>
-        new(dataSource, new JsonSchemaValidator(), TimeProvider.System);
+        new(dataSource, new JsonSchemaValidator(), TimeProvider.System, NoopFailpointGate.Instance);
 }

@@ -29,19 +29,24 @@ public static class Failpoints
     // declines to fire, but no armed name reaching the process in the first
     // place. There is deliberately no endpoint that can arm one either -- the
     // only channel is this pair of variables, set before the process starts.
-    public static IFailpointGate FromEnvironment(TextWriter output) =>
+    //
+    // instanceId is bound here and never passed per call: one process is one
+    // instance, and the published rule is that the acknowledgement's instanceId
+    // is that instance's identity -- the lease owner for a worker or dispatcher,
+    // the service name for `api`.
+    public static IFailpointGate FromEnvironment(string instanceId, TextWriter output) =>
         Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1"
-            ? new FailpointGate(Environment.GetEnvironmentVariable("COURSE_FAILPOINT"), output)
+            ? new FailpointGate(Environment.GetEnvironmentVariable("COURSE_FAILPOINT"), instanceId, output)
             : NoopFailpointGate.Instance;
 }
 
 // At a named boundary the component prints exactly one structured line then
-// blocks until the process is killed outright (compose kill == SIGKILL, no
-// signal handler, no graceful path) -- so ReachAsync never returns in
-// production.
+// blocks. The prescribed way out is a forced stop (compose kill == SIGKILL, no
+// signal handler, no graceful path), which is why the verifying run reads the
+// acknowledgement and then kills the container.
 public interface IFailpointGate
 {
-    Task ReachAsync(string name, string instanceId, CancellationToken cancellationToken);
+    Task ReachAsync(string name, CancellationToken cancellationToken);
 }
 
 public sealed class NoopFailpointGate : IFailpointGate
@@ -52,7 +57,7 @@ public sealed class NoopFailpointGate : IFailpointGate
     {
     }
 
-    public Task ReachAsync(string name, string instanceId, CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task ReachAsync(string name, CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 // armedName is COURSE_FAILPOINT verbatim. Null, empty or a name outside the six
@@ -61,12 +66,12 @@ public sealed class NoopFailpointGate : IFailpointGate
 // Compose override and a typo there must not take the component down. Callers
 // invoke this at every boundary they own on every pass, so the boundaries that
 // are not the armed one are always silent.
-public sealed class FailpointGate(string? armedName, TextWriter output) : IFailpointGate
+public sealed class FailpointGate(string? armedName, string instanceId, TextWriter output) : IFailpointGate
 {
     private readonly string? armed =
         armedName is not null && Failpoints.Names.Contains(armedName, StringComparer.Ordinal) ? armedName : null;
 
-    public async Task ReachAsync(string name, string instanceId, CancellationToken cancellationToken)
+    public async Task ReachAsync(string name, CancellationToken cancellationToken)
     {
         if (armed is null || armed != name)
         {
@@ -77,11 +82,16 @@ public sealed class FailpointGate(string? armedName, TextWriter output) : IFailp
         await output.WriteLineAsync(line);
         await output.FlushAsync(CancellationToken.None);
 
-        // Blocks forever -- the caller's own transaction, if any, is left exactly
-        // as it was (open, or already committed by the time this is called).
-        // Tests pass a cancellable token to observe the block without hanging the
-        // suite; production passes CancellationToken.None, so this genuinely
-        // never returns there.
+        // The caller's own transaction, if any, is left exactly as it was: open, or
+        // already committed by the time this is called.
+        //
+        // The token is the only way out, and both real sources of one land on the
+        // right side of the boundary. A test cancels deliberately, to observe the
+        // block without hanging the suite. In `api` the token is the request's, so
+        // a client that gives up and disconnects throws here -- which, before the
+        // commit, rolls the whole command back (exactly the published invariant)
+        // and, after it, only loses a response that was already lost. The worker
+        // and the dispatchers pass a token nothing cancels short of shutdown.
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
     }
 }

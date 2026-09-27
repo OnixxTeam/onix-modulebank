@@ -20,11 +20,9 @@ public sealed class PostgresActionExecutor(
     NpgsqlDataSource dataSource,
     ISchemaValidator validator,
     TimeProvider timeProvider,
-    IFailpointGate? failpoints = null,
-    string instanceId = "api")
+    IFailpointGate failpoints)
     : IActionExecutor
 {
-    private readonly IFailpointGate failpointGate = failpoints ?? NoopFailpointGate.Instance;
 
     public async Task<ActionExecutionResult> ExecuteAsync(
         string moduleName,
@@ -59,7 +57,7 @@ public sealed class PostgresActionExecutor(
         // the same seam Workflow.Worker holds "after_action_before_finish" on.
         if (outcome.Result.IsSuccess)
         {
-            await failpointGate.ReachAsync(Failpoints.AfterManualDecision, instanceId, cancellationToken);
+            await failpoints.ReachAsync(Failpoints.AfterManualDecision, cancellationToken);
         }
 
         if (outcome.Result.IsSuccess || outcome.TargetReturnedError)
@@ -74,7 +72,7 @@ public sealed class PostgresActionExecutor(
         // lost and the signal was not applied before the boundary.
         if (outcome.Result.IsSuccess)
         {
-            await failpointGate.ReachAsync(Failpoints.AfterInboxSaved, instanceId, cancellationToken);
+            await failpoints.ReachAsync(Failpoints.AfterInboxSaved, cancellationToken);
         }
 
         return outcome.Result;

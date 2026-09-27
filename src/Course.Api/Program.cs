@@ -49,15 +49,15 @@ builder.Services.AddSingleton(TimeProvider.System);
 // dependency rather than anything the endpoints know about. Outside
 // COURSE_TEST_PROFILE=1 this is the no-op gate and there is no other way to arm
 // one -- no endpoint activates a failpoint in any profile.
-builder.Services.AddSingleton(Failpoints.FromEnvironment(Console.Out));
+//
+// "api" is this process's Compose service name, which is what the ack's
+// instanceId has to be -- the same rule the worker follows with its lease owner.
+builder.Services.AddSingleton(Failpoints.FromEnvironment("api", Console.Out));
 builder.Services.AddSingleton<IActionExecutor>(services => new PostgresActionExecutor(
     services.GetRequiredService<NpgsqlDataSource>(),
     services.GetRequiredService<ISchemaValidator>(),
     services.GetRequiredService<TimeProvider>(),
-    services.GetRequiredService<IFailpointGate>(),
-    // The ack's instanceId is this process's Compose service name, the same rule
-    // the worker follows with its lease owner.
-    Environment.GetEnvironmentVariable("COURSE_SERVICE_NAME") ?? "api"));
+    services.GetRequiredService<IFailpointGate>()));
 builder.Services.AddSingleton<IOpenApiBuilder, CatalogOpenApiBuilder>();
 builder.Services.AddSingleton<IJwtAuthenticator>(new JwtContextFactory(jwtOptions));
 builder.Services.AddSingleton<ISignatureVerifier>(new ProviderSignatureVerifier(providerHmacSecret));
