@@ -34,6 +34,40 @@ public sealed class DiagnosticsTraceTests : IDisposable
 
     public void Dispose() => workerDataSource.Dispose();
 
+    // The row the verifying run reads out of the read-only projection before it
+    // calls anything: module, action, version, method, outcome, enabled, default.
+    [Fact]
+    public async Task TheActionIsRegisteredAsThePublishedManifestDescribesIt()
+    {
+        var row = await factory.Postgres.QueryAsRuntimeAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(
+                "select version, http_method, outcomes, enabled, is_default, target_schema, target_function "
+                + "from autocheck.action_definitions where module = 'diagnostics' and action = 'trace'",
+                connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync(), "diagnostics.trace is not in the catalog");
+            var read = (
+                Version: reader.GetInt32(0),
+                Method: reader.GetString(1),
+                Outcomes: reader.GetFieldValue<JsonNode>(2).ToJsonString(),
+                Enabled: reader.GetBoolean(3),
+                IsDefault: reader.GetBoolean(4),
+                Schema: reader.GetString(5),
+                Function: reader.GetString(6));
+            Assert.False(await reader.ReadAsync(), "more than one version of diagnostics.trace is published");
+            return read;
+        });
+
+        Assert.Equal(1, row.Version);
+        Assert.Equal("POST", row.Method);
+        Assert.Equal("[\"FOUND\"]", row.Outcomes);
+        Assert.True(row.Enabled);
+        Assert.True(row.IsDefault);
+        Assert.Equal("diagnostics", row.Schema);
+        Assert.Equal("trace_v1", row.Function);
+    }
+
     [Fact]
     public async Task EveryIdentifierOfOneChainReturnsTheSameSubjectFacts()
     {

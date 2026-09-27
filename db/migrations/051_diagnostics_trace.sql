@@ -29,7 +29,7 @@ $$;
 -- The chain root plus the kinds the operator's input matched. matched_by is
 -- ordered by the contract's own enum order (correlationId ... decisionId), not
 -- by a priority the contract never states -- all matches are reported.
-create type diagnostics.root as (
+create type diagnostics.chain_root as (
   operation_id uuid,
   process_id   uuid,
   matched_by   text[]
@@ -37,9 +37,22 @@ create type diagnostics.root as (
 
 -- The only link between an HTTP command's own correlation identifier (or its
 -- Idempotency-Key) and the chain that command started: api.idempotency_keys
--- keeps the envelope the command returned, and payment.submit's result names
--- the process it created. The envelope is read for linkage only -- not one
--- byte of it reaches the trace.
+-- keeps the envelope the command returned, and payment.submit's result names the
+-- process it created.
+--
+-- One view holds that envelope's shape, because two callers ask opposite
+-- questions of it -- the resolver asks "which chain does this identifier name",
+-- the dispatch section asks "which keys and correlations name this chain". The
+-- envelope is read for linkage only; not one byte of it reaches the trace.
+create view diagnostics.command_envelope as
+  select
+    k.request_id,
+    k.envelope ->> 'correlationId'                                       as correlation_id,
+    (k.envelope -> 'result' ->> 'processId')::uuid                       as process_id
+  from api.idempotency_keys k
+  where k.envelope -> 'result' ->> 'processId'
+        ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+
 create function diagnostics.envelope_process(p_identifier text)
 returns uuid
 language sql
@@ -47,16 +60,15 @@ stable
 security definer
 set search_path = ''
 as $$
-  select (k.envelope -> 'result' ->> 'processId')::uuid
-    from api.idempotency_keys k
-   where (k.envelope ->> 'correlationId' = p_identifier or k.request_id = p_identifier)
-     and k.envelope -> 'result' ->> 'processId' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-   order by k.scope_key, k.module, k.action, k.request_id
+  select c.process_id
+    from diagnostics.command_envelope c
+   where c.correlation_id = p_identifier or c.request_id = p_identifier
+   order by c.process_id, c.request_id
    limit 1
 $$;
 
-create function diagnostics.resolve(p_identifier text)
-returns diagnostics.root
+create function diagnostics.resolve_chain_root(p_identifier text)
+returns diagnostics.chain_root
 language plpgsql
 stable
 security definer
@@ -67,7 +79,7 @@ declare
   v_matched      text[] := array[]::text[];
   v_operation_id uuid;
   v_process_id   uuid;
-  v_root         diagnostics.root;
+  v_root         diagnostics.chain_root;
 begin
   -- A non-uuid identifier is ordinary input (externalRequestId, messageId and
   -- requestId are all free-form text), not an error.
@@ -195,9 +207,9 @@ begin
   end if;
 
   -- A correlation or Idempotency-Key that belongs to a worker attempt reaches
-  -- the chain through the job whose execution id the worker uses as its
-  -- request id; one that belongs to an HTTP command reaches it through the
-  -- stored envelope. Both are still root derivation, just one hop longer.
+  -- the chain through the job whose execution id the worker uses as its request
+  -- id; one that belongs to an HTTP command reaches it through the stored
+  -- envelope. Both are still root derivation, just one hop longer.
   if v_process_id is null and v_operation_id is null
     and ('correlationId' = any (v_matched) or 'requestId' = any (v_matched))
   then
@@ -206,12 +218,10 @@ begin
       join workflow.workflow_job j on j.execution_id = d.request_id
      where d.correlation_id = v_uuid or d.request_id = p_identifier
      limit 1;
-  end if;
 
-  if v_process_id is null and v_operation_id is null
-    and ('correlationId' = any (v_matched) or 'requestId' = any (v_matched))
-  then
-    v_process_id := diagnostics.envelope_process(p_identifier);
+    if v_process_id is null then
+      v_process_id := diagnostics.envelope_process(p_identifier);
+    end if;
   end if;
 
   if v_operation_id is null and v_process_id is not null then
@@ -250,10 +260,9 @@ security definer
 set search_path = ''
 as $$
   with envelopes as (
-    select k.request_id, k.envelope ->> 'correlationId' as correlation_id
-      from api.idempotency_keys k
-     where k.envelope -> 'result' ->> 'processId' = p_process_id::text
-        or k.envelope -> 'result' ->> 'operationId' = p_operation_id::text
+    select c.request_id, c.correlation_id
+      from diagnostics.command_envelope c
+     where c.process_id = p_process_id
   ),
   -- The receipt-adapter uses the provider's own message id as its
   -- Idempotency-Key, so the dispatch row of an arriving receipt is reachable
@@ -392,10 +401,10 @@ as $$
   where s.process_id = p_process_id
 $$;
 
--- workflow_job.state and the published job.state enum are different
--- vocabularies for the same five situations: DEFERRED is the contract's
--- RETRY_WAIT, DONE its SUCCEEDED, FAILED its DEAD. Mapping here rather than
--- widening the table keeps week 2's own check constraint intact.
+-- No translation for job.state: migration 027 replaced workflow_job_state_check
+-- with the contract's own vocabulary (READY, LEASED, RETRY_WAIT, SUCCEEDED,
+-- DEAD), so the column already holds exactly the published enum. The attempt
+-- section below is the one that still needs a mapping.
 create function diagnostics.section_jobs(p_process_id uuid)
 returns jsonb
 language sql
@@ -408,12 +417,7 @@ as $$
       'jobId', j.job_id,
       'stepInstanceId', j.step_instance_id,
       'executionId', j.execution_id,
-      'state', case j.state
-                 when 'DEFERRED' then 'RETRY_WAIT'
-                 when 'DONE' then 'SUCCEEDED'
-                 when 'FAILED' then 'DEAD'
-                 else j.state
-               end,
+      'state', j.state,
       'leaseVersion', j.lease_version,
       'attemptCount', j.attempt_count,
       'nextAttemptAt', diagnostics.rfc3339(j.next_attempt_at)
@@ -422,8 +426,10 @@ as $$
   where j.process_id = p_process_id
 $$;
 
--- Same vocabulary gap one level down: an attempt that is still running is
--- LEASED in the table and RUNNING in the contract.
+-- The one real vocabulary gap: workflow_attempt.state still carries week 2's
+-- own names (claim_jobs writes 'LEASED'), and the contract calls that state
+-- RUNNING. Mapping here rather than rewriting the constraint and every writer
+-- of it for the sake of an observability contract.
 create function diagnostics.section_attempts(p_process_id uuid)
 returns jsonb
 language sql
@@ -539,7 +545,8 @@ as $$
   where c.process_id = p_process_id
 $$;
 
--- The action target itself: resolve once, then compose the twelve sections.
+-- The action target itself: resolve the root once, then compose the twelve
+-- required properties (eleven sections plus the echo of the query).
 create function diagnostics.trace_v1(p_context jsonb, p_payload jsonb)
 returns jsonb
 language plpgsql
@@ -549,9 +556,9 @@ set search_path = ''
 as $$
 declare
   v_identifier text := p_payload ->> 'identifier';
-  v_root       diagnostics.root;
+  v_root       diagnostics.chain_root;
 begin
-  v_root := diagnostics.resolve(v_identifier);
+  v_root := diagnostics.resolve_chain_root(v_identifier);
 
   if pg_catalog.cardinality(v_root.matched_by) = 0 then
     return pg_catalog.jsonb_build_object(
@@ -585,8 +592,9 @@ begin
 end;
 $$;
 
+revoke all on diagnostics.command_envelope from public;
 revoke all on function diagnostics.rfc3339(timestamptz) from public;
-revoke all on function diagnostics.resolve(text) from public;
+revoke all on function diagnostics.resolve_chain_root(text) from public;
 revoke all on function diagnostics.section_dispatches(uuid, uuid, text) from public;
 revoke all on function diagnostics.envelope_process(text) from public;
 revoke all on function diagnostics.section_operation(uuid) from public;

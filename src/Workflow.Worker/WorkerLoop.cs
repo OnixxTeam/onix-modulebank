@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
 using Course.Core.Context;
+using Course.Core.Diagnostics;
 using Course.Core.Errors;
 using Course.Core.Validation;
 using Course.Infrastructure.Postgres;
@@ -148,7 +149,7 @@ public sealed partial class WorkerLoop(
         // after that commit and strictly before api.invoke, so it fires on a
         // successful claim only, never on an empty-poll iteration (RunOnceAsync
         // returns WorkerStepResult.NoJob before ever calling this method).
-        await failpointGate.ReachAsync("after_job_claim", owner, cancellationToken);
+        await failpointGate.ReachAsync(Failpoints.AfterJobClaim, cancellationToken);
 
         var task = job["task"]!;
         var processData = job["process"]!["data"];
@@ -273,7 +274,7 @@ public sealed partial class WorkerLoop(
         // response-schema check both already happened inside
         // ExecuteInTransactionAsync above, and the transaction is still open --
         // this call must not commit or roll it back either way.
-        await failpointGate.ReachAsync("after_action_before_finish", owner, cancellationToken);
+        await failpointGate.ReachAsync(Failpoints.AfterActionBeforeFinish, cancellationToken);
 
         var finish = await FinishAsync(
             connection, transaction, jobId, owner, leaseVersion, pipelineOutcome!.Result.Outcome!, pipelineOutcome.Result.Result!,

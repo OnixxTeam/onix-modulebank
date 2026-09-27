@@ -19,6 +19,7 @@ import psycopg
 from perimeter import db
 from perimeter.classify import ClassificationResult, Retry, Success, Terminal, classify_http_response, classify_transport_failure
 from perimeter.config import DispatcherConfig, InvalidConfigError, MissingConfigError, load_dispatcher_config
+from perimeter.failpoints import AFTER_OUTBOX_CLAIM, AFTER_PROVIDER_RESPONSE, Failpoint, from_environment as failpoint_from_environment
 from perimeter.logs import configure as configure_logging
 from perimeter.observability import Counters, Family, create_observability_app, serve_in_background
 from perimeter.request import build_provider_request
@@ -68,8 +69,29 @@ def attempt_delivery(client: httpx.Client, config: DispatcherConfig, delivery: d
     return classify_http_response(response.status_code, response.content)
 
 
-def process_claim(conn: psycopg.Connection, client: httpx.Client, config: DispatcherConfig, delivery: db.ClaimedDelivery) -> None:
+def process_claim(
+    conn: psycopg.Connection,
+    client: httpx.Client,
+    config: DispatcherConfig,
+    delivery: db.ClaimedDelivery,
+    failpoint: Failpoint | None = None,
+) -> None:
+    failpoint = failpoint if failpoint is not None else Failpoint(None, config.owner)
+
+    # Ticket 13, "after_outbox_claim": claim_outbox ran on an autocommit
+    # connection, so the lease is already durable and no provider request has been
+    # sent yet. A forced stop here leaves the delivery under an owner that will
+    # never report, and the second instance reclaims it once the lease expires.
+    failpoint.reach(AFTER_OUTBOX_CLAIM)
+
     result = attempt_delivery(client, config, delivery)
+
+    # Ticket 13, "after_provider_response": the provider has answered (or the
+    # transport failed) and nothing has been written about it yet. A forced stop
+    # here is the "lost response" case -- the retry goes out with the same
+    # external request id, so the provider deduplicates it and the payment is
+    # neither lost nor doubled.
+    failpoint.reach(AFTER_PROVIDER_RESPONSE)
 
     match result:
         case Success(provider_payment_id=provider_payment_id):
@@ -108,6 +130,10 @@ def run(config: DispatcherConfig) -> None:
     shutdown = ShutdownFlag()
     shutdown.install()
 
+    # The lease owner doubles as the acknowledgement's instanceId, the same rule
+    # the C# worker follows.
+    failpoint = failpoint_from_environment(config.owner)
+
     # Started before the first connection attempt on purpose: liveness must not
     # depend on PostgreSQL, and a process that dies while connecting answers no
     # probe at all. Readiness is what reports the database, and it reports it as
@@ -142,7 +168,7 @@ def run(config: DispatcherConfig) -> None:
             for delivery in claims:
                 if shutdown.requested:
                     return
-                process_claim(conn, client, config, delivery)
+                process_claim(conn, client, config, delivery, failpoint)
 
 
 def postgres_reachable() -> bool:

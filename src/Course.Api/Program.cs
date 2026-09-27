@@ -3,6 +3,7 @@ using Course.Api.Endpoints;
 using Course.Api.Observability;
 using Course.Api.Middleware;
 using Course.Core.Actions;
+using Course.Core.Diagnostics;
 using Course.Core.OpenApi;
 using Course.Core.Security;
 using Course.Core.Validation;
@@ -43,7 +44,20 @@ var runtimeDataSource = NpgsqlDataSource.Create(
 builder.Services.AddSingleton(runtimeDataSource);
 builder.Services.AddSingleton<ISchemaValidator, JsonSchemaValidator>();
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<IActionExecutor, PostgresActionExecutor>();
+// Week 4, ticket 13: the two failpoints this process owns are on the generic
+// action seam inside PostgresActionExecutor, so the gate is a constructor
+// dependency rather than anything the endpoints know about. Outside
+// COURSE_TEST_PROFILE=1 this is the no-op gate and there is no other way to arm
+// one -- no endpoint activates a failpoint in any profile.
+//
+// "api" is this process's Compose service name, which is what the ack's
+// instanceId has to be -- the same rule the worker follows with its lease owner.
+builder.Services.AddSingleton(Failpoints.FromEnvironment("api", Console.Out));
+builder.Services.AddSingleton<IActionExecutor>(services => new PostgresActionExecutor(
+    services.GetRequiredService<NpgsqlDataSource>(),
+    services.GetRequiredService<ISchemaValidator>(),
+    services.GetRequiredService<TimeProvider>(),
+    services.GetRequiredService<IFailpointGate>()));
 builder.Services.AddSingleton<IOpenApiBuilder, CatalogOpenApiBuilder>();
 builder.Services.AddSingleton<IJwtAuthenticator>(new JwtContextFactory(jwtOptions));
 builder.Services.AddSingleton<ISignatureVerifier>(new ProviderSignatureVerifier(providerHmacSecret));

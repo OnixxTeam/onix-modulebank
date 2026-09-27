@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Course.Core.Diagnostics;
 using Course.Core.Actions;
 using Course.Core.Validation;
 using Course.Infrastructure.Postgres;
@@ -263,7 +264,7 @@ public sealed class WorkerLoopTests
 
         var owner = NewOwner();
         var output = new StringWriter();
-        var loop = CreateLoop(owner, new FailpointGate("after_job_claim", output));
+        var loop = CreateLoop(owner, new FailpointGate("after_job_claim", owner, output));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
@@ -295,7 +296,7 @@ public sealed class WorkerLoopTests
 
         var owner = NewOwner();
         var output = new StringWriter();
-        var loop = CreateLoop(owner, new FailpointGate("after_action_before_finish", output));
+        var loop = CreateLoop(owner, new FailpointGate("after_action_before_finish", owner, output));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
