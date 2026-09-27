@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
 using Course.Core.Context;
+using Course.Core.Diagnostics;
 using Course.Core.Errors;
 using Course.Core.Validation;
 using Npgsql;
@@ -15,9 +16,16 @@ namespace Course.Infrastructure.Postgres;
 // api.invoke already rolled the domain effect back to a savepoint for that case,
 // leaving only the dispatch row to persist as the technical audit trail
 // (contract-reference: "Target вернул status=error" row).
-public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaValidator validator, TimeProvider timeProvider)
+public sealed class PostgresActionExecutor(
+    NpgsqlDataSource dataSource,
+    ISchemaValidator validator,
+    TimeProvider timeProvider,
+    IFailpointGate? failpoints = null,
+    string instanceId = "api")
     : IActionExecutor
 {
+    private readonly IFailpointGate failpointGate = failpoints ?? NoopFailpointGate.Instance;
+
     public async Task<ActionExecutionResult> ExecuteAsync(
         string moduleName,
         string actionName,
@@ -37,9 +45,36 @@ public sealed class PostgresActionExecutor(NpgsqlDataSource dataSource, ISchemaV
             connection, transaction, moduleName, actionName, explicitVersion, claims, correlationId, requestId, payload,
             callerContext: null, cancellationToken, signatureVersion, signatureBodyHashHex);
 
+        // Week 4, ticket 13 -- both failpoints this process owns live here, on the
+        // two generic moments of an HTTP action, and neither knows which action it
+        // is stopping. That is the whole point: no domain name may appear in C#,
+        // so the verifying run arms the point and immediately issues the command it
+        // wants stopped.
+        //
+        // "after_manual_decision" is the pre-commit moment: the SQL effect ran and
+        // its result was validated against the manifest, and this transaction is
+        // still open. A forced stop here rolls all of it back together -- the
+        // effect, the transition, the new job and the successful idempotency
+        // result -- which is exactly the invariant the published table names. It is
+        // the same seam Workflow.Worker holds "after_action_before_finish" on.
+        if (outcome.Result.IsSuccess)
+        {
+            await failpointGate.ReachAsync(Failpoints.AfterManualDecision, instanceId, cancellationToken);
+        }
+
         if (outcome.Result.IsSuccess || outcome.TargetReturnedError)
         {
             await transaction.CommitAsync(cancellationToken);
+        }
+
+        // "after_inbox_saved" is the post-commit moment: whatever this action wrote
+        // is durable and readable through the projections, and the HTTP response has
+        // not been written yet. A forced stop here loses the response and keeps the
+        // record, which is what lets the verifying run prove the message was never
+        // lost and the signal was not applied before the boundary.
+        if (outcome.Result.IsSuccess)
+        {
+            await failpointGate.ReachAsync(Failpoints.AfterInboxSaved, instanceId, cancellationToken);
         }
 
         return outcome.Result;

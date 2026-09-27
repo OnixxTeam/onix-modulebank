@@ -1,4 +1,5 @@
 using System.Globalization;
+using Course.Core.Diagnostics;
 using Course.Infrastructure.Postgres;
 using Course.Infrastructure.Validation;
 using Course.Observability;
@@ -37,7 +38,7 @@ internal static class WorkerHost
         var owner = RequireEnv("WORKFLOW_WORKER_OWNER");
         var connectionString = BuildConnectionString();
         var intervals = BuildIntervalProfile();
-        var failpoints = new FailpointGate(Environment.GetEnvironmentVariable("COURSE_FAILPOINT"), Console.Out);
+        var failpoints = Failpoints.FromEnvironment(Console.Out);
 
         // One JsonSchemaValidator for the whole process: a second instance compiling
         // the same catalog schema text (the loop's pre-check and the executor's own

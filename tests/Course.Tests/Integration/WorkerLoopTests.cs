@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Course.Core.Diagnostics;
 using Course.Core.Actions;
 using Course.Core.Validation;
 using Course.Infrastructure.Postgres;

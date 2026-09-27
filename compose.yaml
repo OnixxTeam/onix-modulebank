@@ -157,6 +157,10 @@ services:
       # clean start and the circuit is not ready without a manual override.
       WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-a
+      # Both halves of the closed profile, because arming a point takes both: the
+      # gate does not exist unless COURSE_TEST_PROFILE is exactly "1" (ticket 13),
+      # so a production stand ignores COURSE_FAILPOINT even when something sets it.
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
 
