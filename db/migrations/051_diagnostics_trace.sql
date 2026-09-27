@@ -255,12 +255,33 @@ as $$
      where k.envelope -> 'result' ->> 'processId' = p_process_id::text
         or k.envelope -> 'result' ->> 'operationId' = p_operation_id::text
   ),
+  -- The receipt-adapter uses the provider's own message id as its
+  -- Idempotency-Key, so the dispatch row of an arriving receipt is reachable
+  -- from the chain's messages -- and reachable the same way whichever identifier
+  -- the operator asked by.
+  messages as (
+    select i.message_id as value
+      from delivery.inbox i
+      join core.external_requests e on e.external_request_id = i.external_request_id
+     where e.operation_id = p_operation_id
+    union
+    select r.message_id
+      from core.receipts r
+      join core.external_requests e on e.external_request_id = r.external_request_id
+     where e.operation_id = p_operation_id
+  ),
   request_ids as (
     select j.execution_id as value from workflow.workflow_job j where j.process_id = p_process_id
     union
     select e.request_id from envelopes e
     union
-    select p_identifier
+    select m.value from messages m
+    union
+    -- Only when there is no root at all. Seeding the operator's own input into a
+    -- chain that does have a root is what breaks the contract's main promise:
+    -- an identifier that happens to be some dispatch's request id would add a row
+    -- the other ten identifiers cannot see.
+    select p_identifier where p_operation_id is null and p_process_id is null
   ),
   correlation_ids as (
     select ob.correlation_id::text as value
@@ -270,7 +291,7 @@ as $$
     union
     select e.correlation_id from envelopes e
     union
-    select p_identifier
+    select p_identifier where p_operation_id is null and p_process_id is null
   )
   select coalesce(pg_catalog.jsonb_agg(
     pg_catalog.jsonb_build_object(

@@ -79,6 +79,14 @@ public sealed class DiagnosticsTraceTests : IDisposable
             result.Select(property => property.Key).OrderBy(name => name, StringComparer.Ordinal).ToArray());
 
         Assert.NotEmpty(result["dispatches"]!.AsArray());
+        // Every hop of the chain that goes through the HTTP surface: the command
+        // that started it, the worker's own calls, and the receipt arriving.
+        var modules = result["dispatches"]!.AsArray()
+            .Select(item => $"{item!["module"]!.GetValue<string>()}.{item["action"]!.GetValue<string>()}")
+            .ToList();
+        Assert.Contains("payment.submit", modules);
+        Assert.Contains("receipt.accept", modules);
+        Assert.Contains("payment.prepare_external", modules);
         Assert.NotEmpty(result["operationEvents"]!.AsArray());
         Assert.NotEmpty(result["steps"]!.AsArray());
         Assert.NotEmpty(result["jobs"]!.AsArray());
@@ -149,6 +157,30 @@ public sealed class DiagnosticsTraceTests : IDisposable
         Assert.DoesNotContain("\"message\"", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("providerPaymentId", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("v1=", raw, StringComparison.Ordinal);
+    }
+
+    // What another client chose as its Idempotency-Key must not change what the
+    // trace says. Seeding the operator's own input into the dispatch section made
+    // it change, which is how the real asymmetry showed up: receipt-adapter uses
+    // the message id as its key, so asking by message id returned a dispatch row
+    // the other ten identifiers could not see.
+    [Fact]
+    public async Task AnUnrelatedCommandKeyedOnAChainIdentifierDoesNotChangeTheTrace()
+    {
+        var chain = await BuildProviderChainAsync();
+        var byRoot = WithoutQuery((await TraceAsync(chain.OperationId.ToString())).Body["result"]!);
+
+        // A command from somewhere else that happens to use this chain's external
+        // request id as its Idempotency-Key. It belongs to no chain of its own.
+        using var client = factory.CreateClient();
+        var unrelated = await client.PostActionAsync(
+            "/api/workflow/probe", WorkerToken(),
+            new JsonObject { ["mode"] = "SUCCESS", ["value"] = $"unrelated-{Guid.NewGuid():N}" },
+            idempotencyKey: chain.ExternalRequestId);
+        Assert.Equal(200, unrelated.StatusCode);
+
+        Assert.Equal(byRoot, WithoutQuery((await TraceAsync(chain.OperationId.ToString())).Body["result"]!));
+        Assert.Equal(byRoot, WithoutQuery((await TraceAsync(chain.ExternalRequestId)).Body["result"]!));
     }
 
     [Fact]
@@ -354,8 +386,13 @@ public sealed class DiagnosticsTraceTests : IDisposable
             ["providerPaymentId"] = messageId,
             ["version"] = 1,
         }.ToJsonString();
+        // The Idempotency-Key is the message id, exactly as receipt-adapter sends
+        // it (adapter.py uses callback.provider_payment_id). That is not a detail:
+        // it makes the message id match as a requestId too, and an earlier version
+        // of section_dispatches seeded the operator's input into the chain, so this
+        // one identifier returned a dispatch row the other ten could not see.
         var accepted = await client.PostRawActionAsync(
-            "/api/receipt/accept", ProviderToken(), body, $"receipt-{Guid.NewGuid():N}",
+            "/api/receipt/accept", ProviderToken(), body, messageId,
             ProviderSignature.Header(ApiFactory.ProviderHmacSecret, Encoding.UTF8.GetBytes(body)));
         Assert.Equal(200, accepted.StatusCode);
 
@@ -461,6 +498,9 @@ public sealed class DiagnosticsTraceTests : IDisposable
     private static string ClientToken() => ApiFactory.CreateToken("candidate-client", "web", "payment:write payment:read workflow:read");
 
     private static string ReviewerToken() => ApiFactory.CreateToken("reviewer", "backoffice", "workflow:manual payment:read");
+
+    private static string WorkerToken() =>
+        ApiFactory.CreateToken("workflow-worker", "worker", "workflow:execute workflow:read payment:internal");
 
     private static string ProviderToken() => ApiFactory.CreateToken("receipt-provider", "receipt-adapter", "receipt:write");
 
