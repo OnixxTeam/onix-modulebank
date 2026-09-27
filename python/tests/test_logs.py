@@ -29,10 +29,13 @@ def test_a_line_is_one_json_object_with_the_level_and_the_logger():
     assert "timestamp" in line
 
 
-def test_the_line_is_a_single_line():
+# One physical line per record, and a newline inside the text survives as an escape
+# rather than splitting the object in two.
+def test_a_multiline_message_stays_one_line_and_round_trips():
     formatted = JsonFormatter().format(make_record("delivery\nfailed"))
 
     assert "\n" not in formatted
+    assert json.loads(formatted)["message"] == "delivery\nfailed"
 
 
 # The identifiers a step is diagnosed by. Unique values are allowed in logs, unlike
@@ -90,3 +93,26 @@ def test_an_exception_is_reported_by_type_and_text_only():
     assert line["error"] == "ValueError"
     assert line["error_message"] == "connection refused"
     assert "Traceback" not in json.dumps(line)
+
+
+# Redaction by key cannot reach a credential quoted inside free text, and a libpq
+# error repeats the connection string it failed on.
+def test_a_credential_quoted_inside_a_field_is_scrubbed():
+    line = render(make_record("connection failed", detail="host=postgres user=outbox_dispatcher password=s3cret"))
+
+    assert "s3cret" not in json.dumps(line)
+    assert "outbox_dispatcher" in line["detail"]
+
+
+def test_an_exception_message_is_scrubbed_too():
+    import sys
+
+    try:
+        raise RuntimeError("connection string: password=s3cret sslmode=disable")
+    except RuntimeError:
+        record = make_record("outbox claim failed")
+        record.exc_info = sys.exc_info()
+        line = render(record)
+
+    assert "s3cret" not in json.dumps(line)
+    assert line["error"] == "RuntimeError"

@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _datetime
 import json
 import logging
+import re
 
 # Keys whose value never belongs in a log line, whatever a caller passes. Matched on
 # the key rather than the value, because the value is exactly what must not be seen:
@@ -35,7 +36,6 @@ REDACTED_KEYS = frozenset(
         "body",
         "receipt",
         "receipt_body",
-        "message",
         "reason",
     }
 )
@@ -47,17 +47,31 @@ _RESERVED = frozenset(
 ) | {"message", "asctime", "taskName"}
 
 
+# Credentials quoted inside a free-text message, which redaction by key cannot
+# reach: a libpq error repeats the connection string it failed on.
+_CREDENTIAL_IN_TEXT = re.compile(
+    r"(?i)\b(password|pgpassword|authorization|token|secret)\s*[=:]\s*\S+"
+)
+
+
+def scrub(text: str) -> str:
+    """Replaces credential-looking assignments inside free text."""
+    return _CREDENTIAL_IN_TEXT.sub(lambda match: f"{match.group(1)}={REDACTED}", text)
+
+
 def _safe(key: str, value: object) -> object:
-    return REDACTED if key.lower() in REDACTED_KEYS else value
+    if key.lower() in REDACTED_KEYS:
+        return REDACTED
+    return scrub(value) if isinstance(value, str) else value
 
 
 class JsonFormatter(logging.Formatter):
     """Renders a record as one JSON object, extras included and secrets left out.
 
-    ``message`` is the record's own text, which is why "message" is not treated as a
-    redacted key at the top level -- the log call decides that text. A field named
-    ``message`` passed through ``extra`` is a different thing (a provider callback's
-    own message is one) and is redacted.
+    ``message`` is the record's own text, which the log call decides. A field of that
+    name passed through ``extra`` -- a provider callback carries one, and the contract
+    forbids it in logs -- never reaches the line at all: ``logging`` reserves the
+    attribute, so it is skipped here and rejected outright by ``Logger.makeRecord``.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -76,10 +90,12 @@ class JsonFormatter(logging.Formatter):
             payload[key] = _safe(key, value)
 
         if record.exc_info:
-            # The type and the message, never the payload that produced them.
+            # The type and the message, never the payload that produced them -- and the
+            # message is scrubbed, because a driver's own error text can quote the
+            # connection string that produced it, password included.
             exception = record.exc_info[1]
             payload["error"] = type(exception).__name__ if exception else "unknown"
-            payload["error_message"] = str(exception) if exception else ""
+            payload["error_message"] = scrub(str(exception)) if exception else ""
 
         return json.dumps(payload, ensure_ascii=False, default=str)
 

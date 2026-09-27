@@ -108,16 +108,21 @@ def run(config: DispatcherConfig) -> None:
     shutdown = ShutdownFlag()
     shutdown.install()
 
+    # Started before the first connection attempt on purpose: liveness must not
+    # depend on PostgreSQL, and a process that dies while connecting answers no
+    # probe at all. Readiness is what reports the database, and it reports it as
+    # not ready until the connection succeeds.
+    serve_in_background(
+        create_observability_app(readiness=postgres_reachable, metrics=metric_families),
+        port=OBSERVABILITY_PORT,
+    )
+
     with psycopg.connect(autocommit=True) as conn, httpx.Client(follow_redirects=False) as client:
         # PostgreSQL is this process's only critical dependency; the provider is
         # deliberately not one, because a provider outage accumulates in the Outbox
         # and is a normal mode rather than an unready process. The probe opens its
         # own connection so a loop parked mid-claim cannot make readiness hang on
         # the connection it is holding.
-        serve_in_background(
-            create_observability_app(readiness=postgres_reachable, metrics=metric_families),
-            port=OBSERVABILITY_PORT,
-        )
 
         while not shutdown.requested:
             try:

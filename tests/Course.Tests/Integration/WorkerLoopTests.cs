@@ -395,6 +395,8 @@ public sealed class WorkerLoopTests
         await CreateLoop(NewOwner(), factory.Postgres.JobRuntime, failpoints: null, recorder)
             .RunOnceAsync(CancellationToken.None);
 
+        Assert.NotEmpty(recorder.Rendered);
+
         foreach (var rendered in recorder.Rendered)
         {
             // The step's own value is part of the payload and the result; neither

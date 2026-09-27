@@ -73,7 +73,8 @@ public sealed class OutboxDeadAndLateReceiptTests
         var delivery = await NewDeliveryAsync();
         var dead = await ExhaustAsync(delivery);
 
-        await AcceptReceiptAsync(delivery);
+        var accepted = await AcceptReceiptAsync(delivery, $"provider-payment-{Guid.NewGuid():N}");
+        Assert.Contains("\"status\":\"ok\"", accepted.Replace(" ", ""), StringComparison.Ordinal);
 
         var confirmed = await ReadAsync(delivery);
 
@@ -85,6 +86,13 @@ public sealed class OutboxDeadAndLateReceiptTests
         Assert.Equal(dead.DeadAt, confirmed.DeadAt);
         Assert.Equal(dead.LastErrorCode, confirmed.LastErrorCode);
         Assert.Equal(dead.AttemptCount, confirmed.AttemptCount);
+
+        // And the receipt is durably in the Inbox, which is what lets the waiting
+        // process be continued afterwards: reconcile_inbox turns it into the signal,
+        // and that path has its own tests.
+        var inboxState = await factory.Postgres.ScalarAsOwnerAsync<string>(
+            "select state from delivery.inbox where external_request_id = @id", ("id", delivery));
+        Assert.Equal("RECEIVED", inboxState);
     }
 
     [Fact]
@@ -92,7 +100,7 @@ public sealed class OutboxDeadAndLateReceiptTests
     {
         var delivery = await NewDeliveryAsync();
         await ExhaustAsync(delivery);
-        await AcceptReceiptAsync(delivery);
+        await AcceptReceiptAsync(delivery, $"provider-payment-{Guid.NewGuid():N}");
 
         // A dispatcher that was still in flight when the receipt landed reports its
         // own failure afterwards. The fencing guard makes that a no-op.
@@ -114,6 +122,8 @@ public sealed class OutboxDeadAndLateReceiptTests
 
         var leased = await ReadProjectionAsync(delivery);
         Assert.Equal("dispatcher-projection", leased.LeaseOwner);
+        // lease_version is not nullable: it starts at 0 and counts up, so the
+        // "empty until the state is reached" rule covers the owner and the deadline.
         Assert.True(leased.LeaseVersion >= 1);
         Assert.NotNull(leased.LeaseUntil);
         Assert.Null(leased.DeadAt);
@@ -132,13 +142,26 @@ public sealed class OutboxDeadAndLateReceiptTests
     [Fact]
     public async Task TheReadOnlyReaderCanSeeTheWidenedProjection()
     {
+        var delivery = await NewDeliveryAsync();
+        await ClaimAsync(delivery, "dispatcher-reader-probe");
+
         await using var connection = new NpgsqlConnection(factory.Postgres.AutocheckReaderConnectionString);
         await connection.OpenAsync();
 
         await using var command = new NpgsqlCommand(
-            "select lease_owner, lease_version, lease_until, dead_at from autocheck.outbox limit 1", connection);
+            """
+            select lease_owner, lease_version, lease_until
+              from autocheck.outbox
+             where external_request_id = @id
+            """,
+            connection);
+        command.Parameters.AddWithValue("id", delivery);
+        await using var reader = await command.ExecuteReaderAsync();
 
-        await command.ExecuteScalarAsync();
+        Assert.True(await reader.ReadAsync(), "the reader saw no row for the claimed delivery");
+        Assert.Equal("dispatcher-reader-probe", reader.GetString(0));
+        Assert.True(reader.GetInt64(1) >= 1);
+        Assert.False(reader.IsDBNull(2));
     }
 
     private sealed record OutboxRow(
@@ -263,23 +286,33 @@ public sealed class OutboxDeadAndLateReceiptTests
             return 0;
         });
 
-    // Straight to the confirming statement receipt.accept_v1 runs, not through the
-    // signed HTTP boundary: the signature path is covered by its own tests, and what
-    // matters here is that confirmation reaches a delivery which is already DEAD.
-    private Task<int> AcceptReceiptAsync(string externalRequestId) =>
-        factory.Postgres.QueryAsOwnerAsync(async connection =>
+    // The real registered action, not a hand-written copy of its UPDATE: the property
+    // under test is that receipt.accept_v1 confirms a delivery which is already DEAD,
+    // and a test re-implementing that statement could not notice the function
+    // regressing. Called with the context its signature boundary would have stamped --
+    // the boundary itself has its own tests (ReceiptAcceptTests).
+    private Task<string> AcceptReceiptAsync(string externalRequestId, string messageId)
+    {
+        var body =
+            $"{{\"messageId\":\"{messageId}\",\"externalRequestId\":\"{externalRequestId}\"," +
+            "\"version\":1,\"outcome\":\"COMPLETED\",\"providerPaymentId\":\"provider-late-receipt\"," +
+            "\"occurredAt\":\"2026-09-27T00:00:00Z\"}";
+
+        return factory.Postgres.QueryAsOwnerAsync(async connection =>
         {
-            await using var confirm = new NpgsqlCommand(
+            await using var accept = new NpgsqlCommand(
                 """
-                update delivery.outbox
-                   set state = 'CONFIRMED', delivered_at = now()
-                 where external_request_id = @id
-                   and state <> 'CONFIRMED'
+                select receipt.accept_v1(
+                  jsonb_build_object(
+                    'rawBodyHash', encode(sha256(@body::bytea), 'hex'),
+                    'transport', jsonb_build_object('signatureVerified', true)),
+                  @body::jsonb)::text
                 """,
                 connection);
-            confirm.Parameters.AddWithValue("id", externalRequestId);
-            return await confirm.ExecuteNonQueryAsync();
+            accept.Parameters.AddWithValue("body", body);
+            return (string)(await accept.ExecuteScalarAsync())!;
         });
+    }
 
     private Task<string> FailForResultAsync(
         string externalRequestId, string owner, long leaseVersion, string errorCode) =>

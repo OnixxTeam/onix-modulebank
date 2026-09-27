@@ -120,8 +120,10 @@ $$;
 -- nothing the view cannot give.
 --
 -- Empty until the corresponding state is reached, per the published nullability
--- rule: no lease columns on a delivery nobody has claimed, no dead_at on one that
--- still has attempts left.
+-- rule: no lease owner and no deadline on a delivery nobody has claimed, no dead_at
+-- on one that still has attempts left. lease_version is the exception and is never
+-- empty -- it is NOT NULL DEFAULT 0 in the table (migration 037) and counts up from
+-- there, so an unclaimed delivery reports 0 rather than nothing.
 create or replace view autocheck.outbox as
   select outbox_id,
          external_request_id,
