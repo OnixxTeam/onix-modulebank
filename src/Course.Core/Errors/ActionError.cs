@@ -31,6 +31,11 @@ public sealed record ActionError(int HttpStatus, string Code, string Message, bo
         ["receipt.signature_required"] = 403,
         ["payload.invalid"] = 422,
         ["receipt.external_request_not_found"] = 422,
+        // diagnostics.trace's own not-found (ticket 11). Same shape of exception
+        // as the two above: the generic fallback derives 404 only from a code
+        // whose last dotted segment is literally "not_found", and this one's is
+        // "trace_not_found", so the contract's 404 needs spelling out here.
+        ["diagnostics.trace_not_found"] = 404,
         ["dependency.unavailable"] = 503,
         ["action.contract_violation"] = 500,
         ["action.timeout"] = 504,
