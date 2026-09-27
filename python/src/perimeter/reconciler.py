@@ -18,10 +18,35 @@ import time
 import psycopg
 
 from perimeter import db
-from perimeter.config import MissingConfigError, ReconcilerConfig, load_reconciler_config
+from perimeter.config import InvalidConfigError, MissingConfigError, ReconcilerConfig, load_reconciler_config
+from perimeter.observability import Counters, Family, create_observability_app, serve_in_background
 from perimeter.runloop import ShutdownFlag, log_and_wait_after_transient_db_error
 
 logger = logging.getLogger("perimeter.reconciler")
+
+# Internal only -- no host port is published for this service.
+OBSERVABILITY_PORT = 8080
+
+POLL_CYCLES = "inbox_reconciler_poll_cycles"
+MESSAGES_APPLIED = "inbox_reconciler_messages_applied"
+
+counters = Counters()
+
+
+def metric_families() -> list[Family]:
+    return [
+        Family(POLL_CYCLES, "counter", "Loop iterations completed", counters.snapshot(POLL_CYCLES)),
+        Family(MESSAGES_APPLIED, "counter", "Inbox messages turned into signals", counters.snapshot(MESSAGES_APPLIED)),
+    ]
+
+
+def postgres_reachable() -> bool:
+    try:
+        with psycopg.connect(connect_timeout=2) as probe, probe.cursor() as cursor:
+            cursor.execute("select 1")
+            return True
+    except psycopg.Error:
+        return False
 
 
 def run(config: ReconcilerConfig) -> None:
@@ -29,6 +54,14 @@ def run(config: ReconcilerConfig) -> None:
     shutdown.install()
 
     with psycopg.connect(autocommit=True) as conn:
+        # PostgreSQL is this process's only critical dependency, same as the
+        # dispatcher's; none of the six published failpoints is reached here, and the
+        # gate's own semantics cover that (an unmatched name is a no-op).
+        serve_in_background(
+            create_observability_app(readiness=postgres_reachable, metrics=metric_families),
+            port=OBSERVABILITY_PORT,
+        )
+
         while not shutdown.requested:
             try:
                 applied = db.reconcile_inbox(conn, config.limit)
@@ -36,7 +69,10 @@ def run(config: ReconcilerConfig) -> None:
                 log_and_wait_after_transient_db_error(logger, "inbox reconcile", exc, config.poll_interval_seconds)
                 continue
 
+            counters.increment(POLL_CYCLES)
+
             if applied:
+                counters.increment(MESSAGES_APPLIED, by=applied)
                 logger.info("inbox reconciled", extra={"applied": applied})
                 # More RECEIVED messages may still be waiting behind this
                 # call's own p_limit -- poll again immediately rather than
@@ -51,7 +87,7 @@ def main() -> None:
 
     try:
         config = load_reconciler_config()
-    except MissingConfigError as exc:
+    except (MissingConfigError, InvalidConfigError) as exc:
         logger.error(str(exc))
         sys.exit(1)
 
