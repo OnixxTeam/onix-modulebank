@@ -10,7 +10,7 @@ psql -v ON_ERROR_STOP=1 \
   -v course_migrator_password="${COURSE_MIGRATOR_PASSWORD:?}" \
   -v course_publisher_password="${COURSE_PUBLISHER_PASSWORD:?}" \
   -v course_runtime_password="${COURSE_RUNTIME_PASSWORD:?}" \
-  -v workflow_worker_password="${WORKFLOW_WORKER_PASSWORD:?}" \
+  -v course_worker_password="${COURSE_WORKER_PASSWORD:?}" \
   -v course_outbox_password="${COURSE_OUTBOX_PASSWORD:?}" \
   -v course_inbox_password="${COURSE_INBOX_PASSWORD:?}" \
   -v course_autocheck_password="${COURSE_AUTOCHECK_PASSWORD:?}" \
@@ -19,7 +19,7 @@ psql -v ON_ERROR_STOP=1 \
 	create role course_migrator    login password :'course_migrator_password' in role course_owner;
 	create role course_publisher   login password :'course_publisher_password';
 	create role course_runtime     login password :'course_runtime_password';
-	create role workflow_worker    login password :'workflow_worker_password';
+	create role workflow_worker    login password :'course_worker_password';
 	create role outbox_dispatcher  login password :'course_outbox_password';
 	create role inbox_reconciler   login password :'course_inbox_password';
 

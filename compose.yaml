@@ -1,19 +1,27 @@
+# The verifying run supplies every value in the published configuration table from
+# its own isolated environment and reads this file back with `docker compose
+# config`. A variable this file does not reference never reaches its recipient, so
+# the references below are contract, not convenience -- scripts/compose_seam_check.py
+# checks them without a full run.
 x-course-db-env: &course-db-env
   COURSE_DB_HOST: postgres
   COURSE_DB_PORT: "5432"
   COURSE_DB_NAME: course
-  # Production default (unset -> long lease, slow poll). The checker's own
-  # override always pins this to "1" for api/cli/worker-a/worker-b regardless
-  # of what is set here (autocheck/public_check.py `_environment`).
+  # Production default (unset -> long lease, slow poll). The verifying run's own
+  # override always pins this to "1" regardless of what is set here, and a tracked
+  # default of "1" would make the 2-second leases and 100 ms polls of the test
+  # profile the normal mode of an ordinary start.
   COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
   # Left out of this anchor deliberately: any *_PASSWORD default. Compose's
   # own `config` output keeps every x-prefixed anchor as a top-level field
-  # verbatim (checked with `docker compose config`), so a secret default
-  # placed here would leak "outside service environment" even though no
-  # service actually resolves the anchor that way -- the checker's
-  # compose-contract secret-distribution check flags exactly that. Each
-  # service below merges this anchor and then sets its own password
-  # variable(s) inline, so no secret-bearing anchor exists at top level.
+  # verbatim, so a secret default placed here would leak "outside service
+  # environment" even though no service actually resolves the anchor that way --
+  # the secret-distribution rule flags exactly that. Each service below merges
+  # this anchor and then sets its own password variable(s) inline, so no
+  # secret-bearing anchor exists at top level.
+  #
+  # COURSE_DB_USER is also absent on purpose: the services that merge this anchor
+  # connect as different roles, and the principal is read per service.
 
 services:
   postgres:
@@ -21,16 +29,27 @@ services:
     environment:
       POSTGRES_DB: course
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${COURSE_POSTGRES_PASSWORD:-postgres}
       COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
       COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
       COURSE_RUNTIME_PASSWORD: ${COURSE_RUNTIME_PASSWORD:-runtime}
-      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      COURSE_WORKER_PASSWORD: ${COURSE_WORKER_PASSWORD:-worker}
       COURSE_OUTBOX_PASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
       COURSE_INBOX_PASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
       # Week 4, ticket 01: the read-only role the verifying run connects as.
       # Addressed to `postgres` alone -- no other service receives it.
       COURSE_AUTOCHECK_PASSWORD: ${COURSE_AUTOCHECK_PASSWORD:-autocheck}
+      # The reliability profile. PostgreSQL is the only recipient of these six in
+      # the published table -- the migration runner runs as `cli` and never sees
+      # them -- so the init path turns them into database settings the delivery and
+      # job functions read at call time (ticket 04). Values here are the test
+      # profile's own.
+      COURSE_OUTBOX_MAX_ATTEMPTS: ${COURSE_OUTBOX_MAX_ATTEMPTS:-4}
+      COURSE_OUTBOX_BACKOFF_BASE_MS: ${COURSE_OUTBOX_BACKOFF_BASE_MS:-200}
+      COURSE_OUTBOX_BACKOFF_MAX_MS: ${COURSE_OUTBOX_BACKOFF_MAX_MS:-800}
+      COURSE_OUTBOX_JITTER_MAX_MS: ${COURSE_OUTBOX_JITTER_MAX_MS:-100}
+      COURSE_OUTBOX_LEASE_MS: ${COURSE_OUTBOX_LEASE_MS:-2000}
+      COURSE_JOB_LEASE_MS: ${COURSE_JOB_LEASE_MS:-2000}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -45,79 +64,91 @@ services:
       retries: 30
     # idle_in_transaction_session_timeout stays at the image's own default (0,
     # disabled): a worker parked on a failpoint holds an idle-in-transaction
-    # connection on purpose (SPEC "Failpoints" #16) and must not be dropped
-    # before the checker reads its ack.
+    # connection on purpose and must not be dropped before the verifying run
+    # reads its acknowledgement.
 
   api:
     build: {context: ., dockerfile: src/Course.Api/Dockerfile}
     environment:
-      COURSE_JWT_ISSUER: moduledev-course
-      COURSE_JWT_AUDIENCE: moduledev-api
+      # The three JWT variables are written out per service rather than shared
+      # through a top-level anchor: `docker compose config` echoes every
+      # x-prefixed anchor verbatim as a top-level field, so the signing key's
+      # default would read as a secret exposed outside any service environment --
+      # exactly what the distribution rule forbids. `api` is the only C# service
+      # that verifies a token; gateway, the workers and cli receive them because
+      # the published table addresses them to every C# service, not because they
+      # check anything (teaching a reverse proxy to validate tokens to justify a
+      # variable would invert week 1's trust boundary, docs/adr/0001).
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER:-moduledev-course}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE:-moduledev-api}
       COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
       COURSE_RUNTIME_DSN: Host=postgres;Port=5432;Database=course;Username=course_runtime;Password=${COURSE_RUNTIME_PASSWORD:-runtime}
-      # Ticket 07: the generic signature boundary's HMAC key. Named exactly
-      # PROVIDER_HMAC_SECRET (SPEC/checker fixture), shared with receipt-adapter
-      # once ticket 12 builds it -- both sides must sign/verify with the same
-      # bytes. No tracked default of real value; the checker always replaces it.
+      # The generic signature boundary's HMAC key, shared with receipt-adapter --
+      # both sides must sign and verify with the same bytes.
       PROVIDER_HMAC_SECRET: ${PROVIDER_HMAC_SECRET:-dev-insecure-hmac-secret-not-for-production}
-    # Not depends_on: cli -- week 2's open checker builds and starts only the
-    # six services TASK.md actually requires (this one plus cli, gateway,
-    # postgres, worker-a, worker-b), scoped by name, so a hard dependency on
-    # another named service's *completion* is the only kind that would even
-    # resolve. Readiness below doesn't wait on schema/publication either, so
-    # api comes up against postgres alone; cli's own default command (bootstrap,
-    # below) applies migrations and publishes built-ins in parallel.
+      # Two of the six commit-boundary failpoints (after_inbox_saved,
+      # after_manual_decision) are reached inside this process; ticket 13 arms
+      # them. Unset means disarmed, which is what a production profile is.
+      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
+    # Not depends_on: cli -- readiness does not wait on schema or publication
+    # either, so api comes up against postgres alone while cli's own default
+    # command (bootstrap, below) applies migrations and publishes built-ins.
     depends_on: {postgres: {condition: service_healthy}}
 
   gateway:
     build: {context: ., dockerfile: src/Course.Gateway/Dockerfile}
-    ports: ["8080:8080"]          # единственная публикация порта во всём файле
+    # The only host port in the whole file, and only on loopback.
+    ports:
+      - "127.0.0.1:${COURSE_GATEWAY_PORT:-8080}:8080"
+    environment:
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER:-moduledev-course}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE:-moduledev-api}
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
     depends_on: {api: {condition: service_started}}
 
   # Compose's own `up` runs this with its default command (bootstrap: apply
-  # migrations, publish built-in actions and maps, exit) -- the checker (and
-  # `make` targets) invoke it ad hoc instead via `compose run --rm cli <args>`,
-  # which overrides the command and ignores this default entirely.
+  # migrations, publish built-in actions and maps, exit) -- the verifying run and
+  # `make` targets invoke it ad hoc via `compose run --rm cli <args>`, which
+  # overrides the command and ignores this default entirely.
   cli:
     build: {context: ., dockerfile: src/Course.Cli/Dockerfile}
     command: ["bootstrap"]
     environment:
       <<: *course-db-env
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER:-moduledev-course}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE:-moduledev-api}
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
       COURSE_MIGRATOR_PASSWORD: ${COURSE_MIGRATOR_PASSWORD:-migrator}
       COURSE_PUBLISHER_PASSWORD: ${COURSE_PUBLISHER_PASSWORD:-publisher}
-      # Week 2's fencing probe (`flow test-finish`) connects as workflow_worker
-      # -- it calls the production finish boundary a real worker calls, so it
-      # needs that role's credential and no other. Before the password defaults
-      # left *course-db-env (ticket 14), cli inherited this implicitly; dropping
-      # it turned the probe's stale-finish rejection into internal.error and
-      # failed week 2's two-worker-reclaim-and-stale-finish check.
-      #
-      # Deliberately sourced from WORKFLOW_WORKER_PASSWORD and not from
-      # COURSE_WORKER_PASSWORD: week 3's secret-distribution rule allows the
-      # worker password in postgres/worker-a/worker-b only, so routing the
-      # graded variable through cli would trade a week-2 failure for a week-3
-      # admission failure.
-      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
+      # No worker password here any more. The published distribution rule allows
+      # that value in postgres, worker-a and worker-b only, so week 2's fencing
+      # probe (`flow test-finish`), which connected as workflow_worker, is broken
+      # by this ticket on purpose and repaired by ticket 03 -- it needs a call to
+      # the production finish boundary, not that particular role.
     restart: "no"
     depends_on: {postgres: {condition: service_healthy}}
 
   # worker-a builds workflow-worker:local; worker-b below only references that
-  # same tag with no build of its own -- Compose builds it once and both
-  # services run the identical image, differing only in WORKFLOW_WORKER_OWNER
-  # (SPEC "тот же image, lease owner worker-a/worker-b").
+  # same tag with no build of its own -- Compose builds it once and both services
+  # run the identical image, differing only in their lease owner.
   worker-a:
     build: {context: ., dockerfile: src/Workflow.Worker/Dockerfile}
     image: workflow-worker:local
-    environment:
+    environment: &worker-env
       <<: *course-db-env
-      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
-      # payment:internal included by default (ticket 13 fix): both payment
-      # maps' every automatic step pins required_policy: [payment:internal]
-      # (Workflow.Core.Security.WorkflowWorkerPrincipal), so without it here
-      # bootstrap's own flow-activation step (ticket 13) fails
-      # flow.policy_insufficient on a clean `docker compose up -d --build`
-      # and the circuit is not ready without a manual override -- exactly
-      # the manual step ticket 13 exists to remove.
+      COURSE_JWT_ISSUER: ${COURSE_JWT_ISSUER:-moduledev-course}
+      COURSE_JWT_AUDIENCE: ${COURSE_JWT_AUDIENCE:-moduledev-api}
+      COURSE_JWT_SIGNING_KEY: ${COURSE_JWT_SIGNING_KEY:-dev-insecure-key-not-for-production-32}
+      COURSE_DB_USER: workflow_worker
+      COURSE_WORKER_PASSWORD: ${COURSE_WORKER_PASSWORD:-worker}
+      COURSE_JOB_LEASE_MS: ${COURSE_JOB_LEASE_MS:-2000}
+      COURSE_WORKER_POLL_MS: ${COURSE_WORKER_POLL_MS:-100}
+      # payment:internal included by default: both payment maps' every automatic
+      # step pins required_policy: [payment:internal], so without it here
+      # bootstrap's own flow-activation step fails flow.policy_insufficient on a
+      # clean start and the circuit is not ready without a manual override.
       WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
       WORKFLOW_WORKER_OWNER: worker-a
       COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
@@ -126,83 +157,85 @@ services:
   worker-b:
     image: workflow-worker:local
     environment:
-      <<: *course-db-env
-      WORKFLOW_WORKER_PASSWORD: ${WORKFLOW_WORKER_PASSWORD:-worker}
-      # Same payment:internal default as worker-a above, same reason.
-      WORKFLOW_WORKER_SCOPES: ${WORKFLOW_WORKER_SCOPES:-workflow:execute workflow:read payment:internal}
+      <<: *worker-env
       WORKFLOW_WORKER_OWNER: worker-b
-      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on: {api: {condition: service_started}}
 
-  # Given external component, pinned by digest (SPEC "Provider image
-  # закреплён по digest") -- tag alone is never trusted. No host port: the
-  # only Compose-visible network is the internal one, gateway stays the sole
-  # external entry point.
+  # Given external component, pinned by digest -- tag alone is never trusted. No
+  # host port: the only Compose-visible network is the internal one, gateway stays
+  # the sole external entry point.
   provider-simulator:
     image: ghcr.io/fintech-dev-lab/internship-provider-simulator@sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74
     environment:
-      # No compose-level default here: PROVIDER_CALLBACK_CAPABILITY is one of
-      # the three variables configuration.md's own table marks
-      # "Default в tracked Compose: Нет" (unlike PROVIDER_URL/OUTBOX_OWNER,
-      # which the table explicitly allows a default for) -- a working local
-      # value lives in .env.example instead, loaded from `.env`, never
-      # baked into this tracked file.
+      # No compose-level default for the capability: the published table marks it
+      # "no default in tracked Compose". A working local value lives in
+      # .env.example instead, loaded from an untracked `.env`.
       CALLBACK_URL: http://receipt-adapter:8082/callbacks/provider-v02/${PROVIDER_CALLBACK_CAPABILITY}
       AUDIT_TOKEN: ${PROVIDER_AUDIT_TOKEN:-}
       # SIMULATOR_MODE/CALLBACK_DELAY/CALLBACK_TIMEOUT/CALLBACK_MAX_ATTEMPTS/
       # CALLBACK_RETRY_DELAY are deliberately absent, not set to an empty
-      # `${VAR:-}` default: the image rejects an *empty* SIMULATOR_MODE
-      # outright ("SIMULATOR_MODE is not supported"), unlike a genuinely
-      # unset variable, which it defaults to "success" -- confirmed by
-      # running the pinned image directly. The checker supplies its own
-      # real values per scenario when it wants anything else.
+      # `${VAR:-}` default: the image rejects an *empty* SIMULATOR_MODE outright
+      # ("SIMULATOR_MODE is not supported"), unlike a genuinely unset variable,
+      # which it defaults to "success" -- confirmed by running the pinned image.
+      # The verifying run supplies its own values per scenario.
 
-  # One locally built image, three entrypoints (SPEC "Три Python-сервиса
-  # запускаются разными entrypoints одного локально собранного image"). Only
-  # this service declares `build:` -- receipt-adapter and inbox-reconciler
-  # below just reference the same `perimeter:local` tag, same pattern as
-  # worker-a/worker-b sharing `workflow-worker:local`. No host port; the
-  # dispatcher never reads physical tables, only delivery.claim_outbox/
-  # succeed_outbox/fail_outbox under its own least-privilege role (ticket 09).
+  # One locally built image, five entrypoints. Only this service declares
+  # `build:` -- every other Python service references the same `perimeter:local`
+  # tag, the same pattern as worker-a/worker-b sharing `workflow-worker:local`.
+  # The two "-b" instances get no image, no storage and no grant of their own.
   outbox-dispatcher:
     build: {context: ./python}
     image: perimeter:local
-    # `python3 -m ...`, not the `outbox-dispatcher` console-script: PID 1's
-    # comm would otherwise read as the (15-char-truncated) script name
-    # instead of `python3`, and the checker's own main-process inspection
-    # (autocheck/public_check.py `main_process_executable`) requires the
-    # configured entrypoint or the running process name to match
-    # `python(3(\.\d+)?)?` -- a plain console-script fails that regex even
-    # though it is Python underneath.
+    # `python3 -m ...`, not the console script: PID 1's comm would otherwise read
+    # as the (15-char-truncated) script name instead of `python3`, and the
+    # verifying run's main-process inspection requires the configured entrypoint or
+    # the running process name to match `python(3(\.\d+)?)?`.
     command: ["python3", "-m", "perimeter.dispatcher"]
-    environment:
+    environment: &dispatcher-env
       PGHOST: postgres
       PGPORT: "5432"
       PGDATABASE: course
       PGUSER: outbox_dispatcher
       PGPASSWORD: ${COURSE_OUTBOX_PASSWORD:-outbox}
       PGAPPNAME: outbox-dispatcher
+      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
       PROVIDER_URL: ${PROVIDER_URL:-http://provider-simulator:8081}
       OUTBOX_OWNER: ${OUTBOX_OWNER:-outbox-dispatcher}
-      COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+      # Ticket 06 reads the first four; the retry budget is PostgreSQL's decision
+      # and reaches the dispatcher only as a log field ("attempt N of M"), and the
+      # lease likewise only to log how long it may hold a claim.
+      COURSE_PROVIDER_TIMEOUT_MS: ${COURSE_PROVIDER_TIMEOUT_MS:-500}
+      COURSE_OUTBOX_POLL_MS: ${COURSE_OUTBOX_POLL_MS:-100}
+      COURSE_OUTBOX_MAX_ATTEMPTS: ${COURSE_OUTBOX_MAX_ATTEMPTS:-4}
+      COURSE_OUTBOX_LEASE_MS: ${COURSE_OUTBOX_LEASE_MS:-2000}
+      # Two of the six failpoints (after_outbox_claim, after_provider_response)
+      # are reached in this process; ticket 13 arms them.
+      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
     depends_on:
       postgres: {condition: service_healthy}
       provider-simulator: {condition: service_started}
 
-  # Ticket 12: the anti-corruption layer. No PGHOST/PGUSER/... entry at all --
-  # this process has no PostgreSQL credentials in any form (SPEC/acceptance:
-  # "У процесса нет учётных данных к PostgreSQL ни в каком виде"), and no
-  # host port either, matching every other Python service.
+  # The second dispatcher: same image, same least-privilege role, its own lease
+  # owner. Both run permanently and compete for the same Outbox rows through the
+  # same SQL boundary -- the fencing lives there, not here.
+  outbox-dispatcher-b:
+    image: perimeter:local
+    command: ["python3", "-m", "perimeter.dispatcher"]
+    environment:
+      <<: *dispatcher-env
+      PGAPPNAME: outbox-dispatcher-b
+      OUTBOX_OWNER: ${OUTBOX_OWNER_B:-outbox-dispatcher-b}
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider-simulator: {condition: service_started}
+
+  # The anti-corruption layer. No PGHOST/PGUSER/... entry at all -- this process
+  # has no PostgreSQL credentials in any form -- and no host port either.
   #
   # PROVIDER_CALLBACK_CAPABILITY/PROVIDER_CALLBACK_TOKEN carry no compose-level
-  # default on purpose -- configuration.md's table marks both
-  # "Default в tracked Compose: Нет" (04-week-3.md: "Synthetic JWT/HMAC/
-  # capability values передаются только через environment проверочного
-  # запуска и не имеют default в tracked Compose"), unlike PROVIDER_HMAC_SECRET
-  # just above (an existing ticket-07 default, not this ticket's to remove).
-  # A missing value here means the adapter fails fast on start (ticket 12
-  # acceptance), exactly as required; local dev values live only in
-  # .env.example, loaded from an untracked `.env`, never in this file.
+  # default on purpose: the published table marks both "no default in tracked
+  # Compose". A missing value means the adapter fails fast on start, exactly as
+  # required; local dev values live only in .env.example.
   receipt-adapter:
     image: perimeter:local
     command: ["python3", "-m", "perimeter.adapter"]
@@ -215,12 +248,12 @@ services:
     depends_on:
       gateway: {condition: service_started}
 
-  # Ticket 13: the thinnest of the three -- one call to delivery.reconcile_inbox
-  # per cycle, its own least-privilege role, no direct table DML.
+  # The thinnest of the Python processes: one call to delivery.reconcile_inbox per
+  # cycle, its own least-privilege role, no direct table DML.
   inbox-reconciler:
     image: perimeter:local
     command: ["python3", "-m", "perimeter.reconciler"]
-    environment:
+    environment: &reconciler-env
       PGHOST: postgres
       PGPORT: "5432"
       PGDATABASE: course
@@ -228,6 +261,20 @@ services:
       PGPASSWORD: ${COURSE_INBOX_PASSWORD:-inbox}
       PGAPPNAME: inbox-reconciler
       COURSE_TEST_PROFILE: ${COURSE_TEST_PROFILE:-}
+      COURSE_INBOX_POLL_MS: ${COURSE_INBOX_POLL_MS:-500}
+      # None of the six failpoints is reached in a reconciler. The variable is
+      # still addressed to it by the published table, and the gate's own semantics
+      # cover it: an unknown or unmatched name is a no-op.
+      COURSE_FAILPOINT: ${COURSE_FAILPOINT:-}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  inbox-reconciler-b:
+    image: perimeter:local
+    command: ["python3", "-m", "perimeter.reconciler"]
+    environment:
+      <<: *reconciler-env
+      PGAPPNAME: inbox-reconciler-b
     depends_on:
       postgres: {condition: service_healthy}
 

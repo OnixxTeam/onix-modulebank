@@ -35,7 +35,7 @@ internal static class WorkerHost
         // service name -- SPEC "instanceId в ack == lease owner == имя Compose-
         // сервиса", all one value from this one variable.
         var owner = RequireEnv("WORKFLOW_WORKER_OWNER");
-        var connectionString = BuildConnectionString("workflow_worker", "WORKFLOW_WORKER_PASSWORD");
+        var connectionString = BuildConnectionString();
         var intervals = BuildIntervalProfile();
         var failpoints = new FailpointGate(Environment.GetEnvironmentVariable("COURSE_FAILPOINT"), Console.Out);
 
@@ -88,10 +88,12 @@ internal static class WorkerHost
             : raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
     }
 
-    // COURSE_TEST_PROFILE=1 selects the test defaults (SPEC: lease 2s, poll
-    // <=100ms); anything else keeps the conservative production defaults (lease
-    // 30s, poll 1s). WORKFLOW_WORKER_LEASE_MS/_POLL_MS each override their own
-    // value regardless of profile, but neither is required.
+    // COURSE_TEST_PROFILE=1 selects the test defaults (lease 2s, poll <=100ms);
+    // anything else keeps the conservative production defaults (lease 30s, poll
+    // 1s). COURSE_JOB_LEASE_MS and COURSE_WORKER_POLL_MS are the published names
+    // and override their own value regardless of profile; the older
+    // WORKFLOW_WORKER_LEASE_MS/_POLL_MS still work as aliases, because week 2's
+    // own tooling sets them.
     private static IntervalProfile BuildIntervalProfile()
     {
         var testProfile = Environment.GetEnvironmentVariable("COURSE_TEST_PROFILE") == "1";
@@ -99,8 +101,8 @@ internal static class WorkerHost
         var defaultPollMs = testProfile ? 100 : 1_000;
 
         return new IntervalProfile(
-            LeaseMs: GetEnvInt("WORKFLOW_WORKER_LEASE_MS") ?? defaultLeaseMs,
-            PollIntervalMs: GetEnvInt("WORKFLOW_WORKER_POLL_MS") ?? defaultPollMs);
+            LeaseMs: GetEnvInt("COURSE_JOB_LEASE_MS") ?? GetEnvInt("WORKFLOW_WORKER_LEASE_MS") ?? defaultLeaseMs,
+            PollIntervalMs: GetEnvInt("COURSE_WORKER_POLL_MS") ?? GetEnvInt("WORKFLOW_WORKER_POLL_MS") ?? defaultPollMs);
     }
 
     private static int? GetEnvInt(string name)
@@ -112,12 +114,18 @@ internal static class WorkerHost
     private static string RequireEnv(string name) =>
         Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException($"{name} is not set");
 
-    private static string BuildConnectionString(string username, string passwordEnvironmentVariable)
+    // The role and its password both come from configuration under the names the
+    // published table uses. COURSE_DB_USER is what makes this process's database
+    // principal readable from the Compose file rather than only from this source
+    // file, which is how least privilege is verified from outside; it still
+    // defaults to the only role a worker may connect as.
+    private static string BuildConnectionString()
     {
         var host = Environment.GetEnvironmentVariable("COURSE_DB_HOST") ?? "postgres";
         var port = Environment.GetEnvironmentVariable("COURSE_DB_PORT") ?? "5432";
         var database = Environment.GetEnvironmentVariable("COURSE_DB_NAME") ?? "course";
-        var password = RequireEnv(passwordEnvironmentVariable);
+        var username = Environment.GetEnvironmentVariable("COURSE_DB_USER") ?? "workflow_worker";
+        var password = RequireEnv("COURSE_WORKER_PASSWORD");
 
         var connectionString = new NpgsqlConnectionStringBuilder
         {
