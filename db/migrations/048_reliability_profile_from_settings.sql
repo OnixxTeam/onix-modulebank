@@ -158,13 +158,21 @@ begin
     v_max_ms := profile.number(
       'course.outbox_backoff_max_ms',
       (v_policy.delays_ms ->> (pg_catalog.jsonb_array_length(v_policy.delays_ms) - 1))::integer);
-    v_jitter_ms := profile.number('course.outbox_jitter_max_ms', 1) - 1;
+    -- The published window is inclusive on both ends: 0..jitter_max. A fallback of
+    -- 1 stands for "no jitter", so an environment without the profile keeps week
+    -- 3's exact schedule; an explicit 1 is indistinguishable from that and also
+    -- means no jitter, which is the only value this reader cannot express (it
+    -- rejects 0 along with every other non-positive setting).
+    v_jitter_ms := profile.number('course.outbox_jitter_max_ms', 1);
 
+    -- The exponent is clamped before it multiplies: 2^31 overflows integer, so a
+    -- generous retry budget would raise here instead of capping. Anything past the
+    -- cap is the cap anyway.
     v_delay_ms := least(
-      v_base_ms * pg_catalog.power(2, greatest(v_row.attempt_count - 1, 0))::integer,
+      v_base_ms * pg_catalog.power(2, least(greatest(v_row.attempt_count - 1, 0), 20))::integer,
       v_max_ms);
 
-    if v_jitter_ms > 0 then
+    if v_jitter_ms > 1 then
       v_delay_ms := v_delay_ms + pg_catalog.floor(pg_catalog.random() * (v_jitter_ms + 1))::integer;
     end if;
 

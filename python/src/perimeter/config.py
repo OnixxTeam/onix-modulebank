@@ -56,12 +56,53 @@ class MissingConfigError(RuntimeError):
         self.missing = missing
 
 
+class InvalidConfigError(RuntimeError):
+    """Raised when a required environment variable is present but unusable."""
+
+    def __init__(self, name: str, raw: str) -> None:
+        super().__init__(f"{name} must be a positive integer number of milliseconds, got {raw!r}")
+        self.name = name
+        self.raw = raw
+
+
+def _positive_int(env: dict[str, str], name: str, default: int) -> int:
+    """Reads a millisecond setting, or fails fast.
+
+    Absent means "take the profile default"; present but unusable means a
+    misconfigured container, and that must stop the process on start rather than
+    silently run with a timeout or a poll interval nobody chose -- a dispatcher
+    quietly polling once every two seconds under the test profile looks exactly
+    like a dispatcher that lost the database.
+    """
+    raw = env.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        raise InvalidConfigError(name, raw) from None
+
+    if value <= 0:
+        raise InvalidConfigError(name, raw)
+
+    return value
+
+
 @dataclass(frozen=True)
 class DispatcherConfig:
     provider_url: str
     owner: str
     poll_interval_seconds: float
     claim_limit: int
+    # The external call's own deadline. It has to be shorter than the delivery
+    # lease, or a slow provider would hold a claim past its expiry and a second
+    # dispatcher would reclaim a delivery still in flight.
+    provider_timeout_seconds: float
+    # Not a decision this process makes -- PostgreSQL owns the retry budget
+    # (ADR 0006) -- only the denominator of the "attempt N of M" log field.
+    max_attempts: int
+    lease_seconds: float
 
 
 def load_dispatcher_config(env: dict[str, str] | None = None) -> DispatcherConfig:
@@ -71,16 +112,20 @@ def load_dispatcher_config(env: dict[str, str] | None = None) -> DispatcherConfi
     if missing:
         raise MissingConfigError(missing)
 
-    # COURSE_TEST_PROFILE=1 selects the short interval the public/hidden
-    # checker needs (same convention as Workflow.Worker's IntervalProfile);
-    # unset or any other value keeps the slower production default.
+    # COURSE_TEST_PROFILE=1 selects the short defaults the verifying run needs
+    # (same convention as Workflow.Worker's IntervalProfile); unset or any other
+    # value keeps the slower production default. Each published variable overrides
+    # its own default regardless of profile.
     test_profile = env.get("COURSE_TEST_PROFILE") == "1"
 
     return DispatcherConfig(
         provider_url=env["PROVIDER_URL"].rstrip("/"),
         owner=env["OUTBOX_OWNER"],
-        poll_interval_seconds=0.2 if test_profile else 2.0,
+        poll_interval_seconds=_positive_int(env, "COURSE_OUTBOX_POLL_MS", 100 if test_profile else 2_000) / 1000,
         claim_limit=5,
+        provider_timeout_seconds=_positive_int(env, "COURSE_PROVIDER_TIMEOUT_MS", 500 if test_profile else 10_000) / 1000,
+        max_attempts=_positive_int(env, "COURSE_OUTBOX_MAX_ATTEMPTS", 4),
+        lease_seconds=_positive_int(env, "COURSE_OUTBOX_LEASE_MS", 2_000 if test_profile else 30_000) / 1000,
     )
 
 
@@ -123,12 +168,11 @@ def load_reconciler_config(env: dict[str, str] | None = None) -> ReconcilerConfi
     if missing:
         raise MissingConfigError(missing)
 
-    # configuration.md/04-week-3.md: test profile poll interval must not
-    # exceed 500 ms; production keeps a slower default, same convention as
-    # the dispatcher's own test-profile switch.
+    # The test profile's own ceiling is 500 ms; production keeps a slower
+    # default, same convention as the dispatcher's switch above.
     test_profile = env.get("COURSE_TEST_PROFILE") == "1"
 
     return ReconcilerConfig(
-        poll_interval_seconds=0.2 if test_profile else 2.0,
+        poll_interval_seconds=_positive_int(env, "COURSE_INBOX_POLL_MS", 200 if test_profile else 2_000) / 1000,
         limit=20,
     )

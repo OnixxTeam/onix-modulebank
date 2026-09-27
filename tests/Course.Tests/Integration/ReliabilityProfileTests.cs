@@ -23,13 +23,17 @@ public sealed class ReliabilityProfileTests
         Assert.InRange(delivery.LeaseSeconds, 55, 65);
     }
 
+    // "Without the profile" has to be produced explicitly now that the init script
+    // puts a database-level value in force: an empty setting reads as absent, which
+    // is the same state a deployment that sets none of these six is in. The policy
+    // row then decides, and week 3's behaviour is what comes out.
     [Fact]
     public async Task WithoutTheProfileTheDeliveryLeaseFallsBackToThePolicyRow()
     {
         var policyLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<int>(
             "select lease_ms from delivery.retry_policy where id = 1");
 
-        var delivery = await NewLeasedDeliveryAsync(leaseMs: null);
+        var delivery = await NewLeasedDeliveryAsync(leaseMs: null, rawLeaseSetting: "");
 
         Assert.InRange(delivery.LeaseSeconds, (policyLeaseMs / 1000.0) - 5, (policyLeaseMs / 1000.0) + 5);
     }
@@ -129,8 +133,76 @@ public sealed class ReliabilityProfileTests
         Assert.InRange(delivery.LeaseSeconds, (policyLeaseMs / 1000.0) - 5, (policyLeaseMs / 1000.0) + 5);
     }
 
+    // The production channel: db/init/01-reliability-profile.sh sets these as
+    // database-level settings, and the fixture mounts that script the way the image
+    // carries it. Without this the suite would only ever prove that the functions
+    // read *a* setting, never that the container produces one.
+    [Theory]
+    [InlineData("course.outbox_max_attempts", 4)]
+    [InlineData("course.outbox_backoff_base_ms", 200)]
+    [InlineData("course.outbox_backoff_max_ms", 800)]
+    [InlineData("course.outbox_jitter_max_ms", 100)]
+    [InlineData("course.outbox_lease_ms", 2000)]
+    [InlineData("course.job_lease_ms", 2000)]
+    public async Task TheInitScriptPutsTheProfileInForceForEverySession(string setting, int expected)
+    {
+        var value = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand("select profile.number(@setting, -1)", connection);
+            command.Parameters.AddWithValue("setting", setting);
+            return (int)(await command.ExecuteScalarAsync())!;
+        });
+
+        Assert.Equal(expected, value);
+    }
+
+    // The published window is inclusive: with jitter_max at 100 a schedule may land
+    // exactly 100 ms out. Read from the database-level profile above, so this also
+    // pins that the two agree.
     [Fact]
-    public async Task TheJobLeaseFallsBackToTheProfileWhenTheCallerPassesNone()
+    public async Task TheJitterWindowIsInclusiveOfItsMaximum()
+    {
+        var delays = new List<double>();
+        for (var index = 0; index < 40; index++)
+        {
+            delays.Add((await FailRepeatedlyAsync(1, new Dictionary<string, string>
+            {
+                ["course.outbox_max_attempts"] = "10",
+                ["course.outbox_backoff_base_ms"] = "1000",
+                ["course.outbox_backoff_max_ms"] = "1000",
+                ["course.outbox_jitter_max_ms"] = "100",
+            }))!.Value);
+        }
+
+        Assert.All(delays, delay => Assert.InRange(delay, 0.5, 1.101));
+    }
+
+    [Fact]
+    public async Task TheProfileReaderReadsTheJobLeaseSetting()
+    {
+        var value = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var transaction = await connection.BeginTransactionAsync();
+            await SetLocalAsync(connection, transaction, new Dictionary<string, string>
+            {
+                ["course.job_lease_ms"] = "45000",
+            });
+
+            await using var command = new NpgsqlCommand("select profile.number('course.job_lease_ms', 30000)", connection, transaction);
+            var read = (int)(await command.ExecuteScalarAsync())!;
+            await transaction.RollbackAsync();
+            return read;
+        });
+
+        Assert.Equal(45000, value);
+    }
+
+    // Narrower than it looks: this proves the call survives a caller with no lease
+    // of its own, not that the lease it then uses is the profile's. The full path
+    // (a worker claiming a real job under a configured lease) is exercised on the
+    // live stand, and the arithmetic is covered by the reader test above.
+    [Fact]
+    public async Task ClaimingWithNoLeaseOfItsOwnIsAccepted()
     {
         await using var connection = new NpgsqlConnection(factory.Postgres.WorkerConnectionString);
         await connection.OpenAsync();

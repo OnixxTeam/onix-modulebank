@@ -20,10 +20,9 @@ set search_path = ''
 stable
 as $$
   select jsonb_build_object(
-    -- Claimable *right now*, mirroring workflow.claim_job's own WHERE clause
-    -- (migration 027): ready, a due retry, or a lease that has expired under a
-    -- dead owner. A metric that counted only READY would read zero while the
-    -- queue was in fact claimable.
+    -- Claimable *right now*, mirroring workflow.claim_jobs' own WHERE clause:
+    -- ready, a due retry, or a lease that has expired under a dead owner. A metric
+    -- counting only READY would read zero while the queue was in fact claimable.
     'workflowJobsReady', (
       select count(*)
         from workflow.workflow_job

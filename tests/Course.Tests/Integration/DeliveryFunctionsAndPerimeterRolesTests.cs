@@ -226,31 +226,36 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
                 await ClaimAsDispatcherAsync($"dispatcher-delay-{attempt}", 10), r => r.ExternalRequestId == externalRequestId);
             await FailAsDispatcherAsync(claim.OutboxId, $"dispatcher-delay-{attempt}", claim.LeaseVersion, "transport.error.retryable");
 
-            // next_attempt_at was set to now() + delay one statement ago, so the
-            // remaining wait is the delay minus however long this round trip
-            // took -- never more than the delay, and not much less. The floor
-            // has to stay wide enough for a loaded CI container yet tight
-            // enough to tell 200 from 400, which 100 ms of slack does for
-            // every value in the profile.
+            // next_attempt_at was set to now() + delay + jitter one statement ago,
+            // so the remaining wait is that sum minus however long this round trip
+            // took. Week 4 added the jitter (ticket 04), which is why the ceiling is
+            // the delay plus the profile's jitter maximum rather than the delay
+            // itself; the floor keeps 100 ms of slack for a loaded CI container and
+            // still tells 200 from 400.
+            var jitterMaxMs = await factory.Postgres.ScalarAsOwnerAsync<int>(
+                "select profile.number('course.outbox_jitter_max_ms', 1)");
             var scheduledInMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
                 "select (extract(epoch from (next_attempt_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
                 ("id", externalRequestId));
-            Assert.InRange(scheduledInMs, expectedDelayMs - 100, expectedDelayMs);
+            Assert.InRange(scheduledInMs, expectedDelayMs - 100, expectedDelayMs + jitterMaxMs);
         }
     }
 
     // The lease was a literal `interval '30 seconds'` inside claim_outbox, so
     // the profile could not reach it at all and a crashed owner held a delivery
-    // for 30 seconds even under the 2-second test profile.
+    // for 30 seconds even under the 2-second test profile. Since week 4 the
+    // effective value may come from a database setting (ticket 04) with the policy
+    // row as its fallback, so the expectation is read the same way the function
+    // reads it.
     [Fact]
-    public async Task ClaimOutbox_TakesItsLeaseFromTheProfileRow_NotAHardcodedInterval()
+    public async Task ClaimOutbox_TakesItsLeaseFromTheProfile_NotAHardcodedInterval()
     {
         var (_, externalRequestId, _) = await PrepareExternalRequestAsync("1700.00");
 
         await ClaimAsDispatcherAsync("dispatcher-lease", 10);
 
         var profileLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<int>(
-            "select lease_ms from delivery.retry_policy where id = 1");
+            "select profile.number('course.outbox_lease_ms', (select lease_ms from delivery.retry_policy where id = 1))");
         var actualLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
             "select (extract(epoch from (lease_expires_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
             ("id", externalRequestId));

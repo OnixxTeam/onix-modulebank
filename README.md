@@ -228,7 +228,7 @@ make start_prod # docker compose up -d --build
 `course_migrator`, публикация манифестов — под `course_publisher`, поэтому у
 CLI нет одной общей пары credentials.
 
-`postgres` получает `POSTGRES_PASSWORD` для собственного суперпользователя и
+`postgres` получает `COURSE_POSTGRES_PASSWORD` для собственного суперпользователя и
 все три пароля ролей — их читает [`db/init/00-roles.sh`](db/init/00-roles.sh)
 при первичной инициализации тома. `COURSE_RUNTIME_PASSWORD` больше нигде из
 окружения не берётся: в `api` он попадает уже внутри `COURSE_RUNTIME_DSN`.
