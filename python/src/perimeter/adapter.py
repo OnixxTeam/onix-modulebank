@@ -156,7 +156,7 @@ def main() -> None:
     try:
         config = load_adapter_config()
     except (MissingConfigError, InvalidConfigError) as exc:
-        logger.error(str(exc))
+        logger.error("invalid adapter configuration", extra={"error_code": type(exc).__name__})
         raise SystemExit(1) from exc
 
     with httpx.Client(follow_redirects=False) as client:

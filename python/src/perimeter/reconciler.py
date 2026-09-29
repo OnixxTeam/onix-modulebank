@@ -94,7 +94,7 @@ def main() -> None:
     try:
         config = load_reconciler_config()
     except (MissingConfigError, InvalidConfigError) as exc:
-        logger.error(str(exc))
+        logger.error("invalid reconciler configuration", extra={"error_code": type(exc).__name__})
         sys.exit(1)
 
     run(config)

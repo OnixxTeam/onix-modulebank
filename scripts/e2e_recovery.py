@@ -170,12 +170,25 @@ def worker_case(name: str, client: str, base_env: dict[str, str]) -> None:
     stop("worker-b")
     override = arm("worker-a", name, base_env)
     try:
-        operation_id, _ = submit(client, name, "PAYMENT_APPROVAL", "100000.00")
+        operation_id, process_id = submit(client, name, "PAYMENT_APPROVAL", "100000.00")
         wait_for_ack("worker-a", name)
+        claimed = rows("SELECT job_id, execution_id, lease_version, state FROM autocheck.jobs "
+            f"WHERE process_id = '{process_id}'::uuid AND state = 'LEASED'")
+        if len(claimed) != 1:
+            raise RecoveryFailure(f"{name}: expected one durable worker lease, got {len(claimed)}")
+        job = claimed[0]
+        if name == "after_job_claim" and rows("SELECT 1 FROM autocheck.action_dispatches "
+            f"WHERE request_id = '{job['execution_id']}'"):
+            raise RecoveryFailure("after_job_claim: action ran before the crash boundary")
     finally:
         disarm("worker-a", override, base_env)
         start("worker-b", base_env=base_env)
     wait_operation(operation_id)
+    finished = rows("SELECT job_id, execution_id, lease_version, state FROM autocheck.jobs "
+        f"WHERE job_id = '{job['job_id']}'::uuid")
+    if len(finished) != 1 or finished[0]["execution_id"] != job["execution_id"] or \
+            finished[0]["lease_version"] <= job["lease_version"] or finished[0]["state"] != "SUCCEEDED":
+        raise RecoveryFailure(f"{name}: worker reclaim did not preserve job/execution identity and advance the lease")
 
 
 def dispatcher_case(name: str, client: str, base_env: dict[str, str]) -> None:
@@ -184,10 +197,22 @@ def dispatcher_case(name: str, client: str, base_env: dict[str, str]) -> None:
     try:
         operation_id, _ = submit(client, name, "PAYMENT_EXECUTION", "1000.00")
         wait_for_ack("outbox-dispatcher", name)
+        claimed = rows("SELECT o.outbox_id, o.external_request_id, o.lease_version, o.state "
+            "FROM autocheck.outbox o JOIN autocheck.external_requests e "
+            "ON e.external_request_id = o.external_request_id "
+            f"WHERE e.operation_id = '{operation_id}'::uuid")
+        if len(claimed) != 1 or claimed[0]["state"] != "LEASED":
+            raise RecoveryFailure(f"{name}: expected one durable leased delivery, got {claimed}")
+        delivery = claimed[0]
     finally:
         disarm("outbox-dispatcher", override, base_env)
         start("outbox-dispatcher-b", base_env=base_env)
     wait_operation(operation_id)
+    finished = rows("SELECT outbox_id, external_request_id, lease_version, state "
+        f"FROM autocheck.outbox WHERE outbox_id = '{delivery['outbox_id']}'::uuid")
+    if len(finished) != 1 or finished[0]["external_request_id"] != delivery["external_request_id"] or \
+            finished[0]["lease_version"] <= delivery["lease_version"] or finished[0]["state"] != "CONFIRMED":
+        raise RecoveryFailure(f"{name}: delivery reclaim did not preserve its external key and advance the lease")
 
 
 def manual_process(client: str, label: str) -> tuple[str, str, str]:
@@ -212,6 +237,8 @@ def manual_case(client: str, reviewer: str, base_env: dict[str, str]) -> None:
         except RecoveryFailure:
             pass  # The request blocks at the acknowledgement boundary until api is killed.
         wait_for_ack("api", "after_manual_decision")
+        if rows(f"SELECT 1 FROM autocheck.decisions WHERE process_id = '{process_id}'::uuid"):
+            raise RecoveryFailure("after_manual_decision: uncommitted decision was visible before API termination")
     finally:
         disarm("api", override, base_env)
     request("workflow", "manual", {"processId": process_id, "stepInstanceId": step_id,
@@ -247,6 +274,9 @@ def callback_case(client: str, base_env: dict[str, str]) -> None:
             # the failpoint.  The acknowledgement below is the real barrier.
             pass
         wait_for_ack("api", "after_inbox_saved")
+        inbox = rows(f"SELECT state FROM autocheck.inbox WHERE message_id = '{message_id}'")
+        if len(inbox) != 1 or inbox[0]["state"] != "RECEIVED":
+            raise RecoveryFailure("after_inbox_saved: receipt was not durable before API termination")
     finally:
         disarm("api", override, base_env)
         start("inbox-reconciler", "inbox-reconciler-b", "outbox-dispatcher", "outbox-dispatcher-b", base_env=base_env)

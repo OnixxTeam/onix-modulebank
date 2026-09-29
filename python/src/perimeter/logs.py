@@ -81,7 +81,7 @@ class JsonFormatter(logging.Formatter):
             ).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": scrub(record.getMessage()),
         }
 
         for key, value in vars(record).items():
@@ -90,12 +90,10 @@ class JsonFormatter(logging.Formatter):
             payload[key] = _safe(key, value)
 
         if record.exc_info:
-            # The type and the message, never the payload that produced them -- and the
-            # message is scrubbed, because a driver's own error text can quote the
-            # connection string that produced it, password included.
+            # Driver exception text may contain a complete connection string.
+            # Keep only the type; the caller supplies a safe error code.
             exception = record.exc_info[1]
             payload["error"] = type(exception).__name__ if exception else "unknown"
-            payload["error_message"] = scrub(str(exception)) if exception else ""
 
         return json.dumps(payload, ensure_ascii=False, default=str)
 

@@ -1,7 +1,7 @@
 using System.Text;
 using Course.Api.Endpoints;
-using Course.Api.Observability;
 using Course.Api.Middleware;
+using Course.Api.Observability;
 using Course.Core.Actions;
 using Course.Core.Diagnostics;
 using Course.Core.OpenApi;

@@ -80,7 +80,7 @@ def test_the_records_own_message_survives_while_an_extra_message_field_never_app
     assert "Payment declined by issuer" not in json.dumps(line)
 
 
-def test_an_exception_is_reported_by_type_and_text_only():
+def test_an_exception_is_reported_by_type_only():
     try:
         raise ValueError("connection refused")
     except ValueError:
@@ -91,7 +91,7 @@ def test_an_exception_is_reported_by_type_and_text_only():
         line = render(record)
 
     assert line["error"] == "ValueError"
-    assert line["error_message"] == "connection refused"
+    assert "error_message" not in line
     assert "Traceback" not in json.dumps(line)
 
 
@@ -104,7 +104,14 @@ def test_a_credential_quoted_inside_a_field_is_scrubbed():
     assert "outbox_dispatcher" in line["detail"]
 
 
-def test_an_exception_message_is_scrubbed_too():
+def test_a_credential_quoted_inside_the_log_message_is_scrubbed():
+    line = render(make_record("connection failed: password=s3cret host=postgres"))
+
+    assert "s3cret" not in json.dumps(line)
+    assert "host=postgres" in line["message"]
+
+
+def test_an_exception_message_is_not_logged():
     import sys
 
     try:

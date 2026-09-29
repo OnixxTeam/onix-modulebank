@@ -186,7 +186,7 @@ def main() -> None:
     try:
         config = load_dispatcher_config()
     except (MissingConfigError, InvalidConfigError) as exc:
-        logger.error(str(exc))
+        logger.error("invalid dispatcher configuration", extra={"error_code": type(exc).__name__})
         sys.exit(1)
 
     run(config)

@@ -117,7 +117,7 @@ public sealed partial class WorkerLoop(
         // to propagate rather than swallowed as a claim failure.
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            LogClaimFailed(log, owner, exception.GetType().Name, exception.Message);
+            LogClaimFailed(log, owner, exception.GetType().Name);
             return WorkerStepResult.ClaimFailed;
         }
 
@@ -365,13 +365,12 @@ public sealed partial class WorkerLoop(
         string action, int actionVersion, string? outcome, string? errorCode, long durationMs);
 
     // A claim that failed has no job to name yet, so it carries what it has: which
-    // worker, and the failure by type and message. No connection string, and no
-    // password: the message of an Npgsql failure names the host and the role, never
-    // the credential.
+    // worker and the failure type. Driver messages can contain connection
+    // strings, so they never cross the log boundary.
     [LoggerMessage(
         Level = LogLevel.Error,
-        Message = "job claim failed, will retry owner={Owner} error={Error} errorMessage={ErrorMessage}")]
-    private static partial void LogClaimFailed(ILogger logger, string owner, string error, string errorMessage);
+        Message = "job claim failed, will retry owner={Owner} error={Error}")]
+    private static partial void LogClaimFailed(ILogger logger, string owner, string error);
 
     private sealed record StepIdentity(
         string Owner,
