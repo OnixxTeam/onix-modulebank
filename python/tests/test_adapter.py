@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from perimeter.adapter import create_app
@@ -150,3 +151,43 @@ def test_the_adapter_does_not_acknowledge_before_the_platform_responds():
 
     assert response.status_code == 200
     assert len(captured) == 1
+
+
+# Ticket 18: every malformed value is classified by the adapter itself, as
+# HTTP 400, before a single upstream request is made -- never passed through
+# to the platform (which would answer 422/503) and never turned into a 500 by
+# an exception inside validation.
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"result": {"nested": "object"}},
+        {"result": ["array"]},
+        {"result": None},
+        {"providerPaymentId": 123},
+        {"operationId": ["array"]},
+        {"message": {"nested": "object"}},
+        {"occurredAt": None},
+        {"providerPaymentId": "provider-123\n"},
+        {"operationId": "external-123\r"},
+        {"message": "text\r\nmore"},
+        {"occurredAt": "2026-09-04T12:00:00Z\n"},
+        {"occurredAt": "2026-13-45T99:99:99Z"},
+        {"occurredAt": "2026-02-30T00:00:00Z"},
+    ],
+)
+def test_a_malformed_value_gives_400_without_any_upstream_call(overrides: dict):
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    payload = json.loads(VALID_BODY)
+    payload.update(overrides)
+    body = json.dumps(payload).encode("utf-8")
+
+    response = _client(handler).post(_CALLBACK_PATH, content=body)
+
+    assert response.status_code == 400
+    assert response.content == b""
+    assert calls == []

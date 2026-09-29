@@ -22,7 +22,9 @@ from fastapi import FastAPI, Request, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from perimeter.callback import parse_callback
-from perimeter.config import AdapterConfig, MissingConfigError, load_adapter_config
+from perimeter.config import AdapterConfig, InvalidConfigError, MissingConfigError, load_adapter_config
+from perimeter.logs import configure as configure_logging
+from perimeter.observability import Counters, Family, mount_observability
 from perimeter.receipt import build_receipt_bytes
 from perimeter.signature import sign_hex
 
@@ -32,9 +34,47 @@ _MAX_BODY_BYTES = 65_536
 _HTTP_TIMEOUT_SECONDS = 10.0
 _DEPENDENCY_UNAVAILABLE_BODY = b'{"status":"error","code":"dependency.unavailable"}'
 
+# This process's own metrics: callbacks in, receipts forwarded by outcome. `outcome`
+# is a closed set, and no identifier ever becomes a label.
+CALLBACKS_RECEIVED = "receipt_adapter_callbacks_received"
+RECEIPTS_FORWARDED = "receipt_adapter_receipts_forwarded"
+
+counters = Counters()
+
+
+def metric_families() -> list[Family]:
+    return [
+        Family(CALLBACKS_RECEIVED, "counter", "Provider callbacks accepted at the boundary", counters.snapshot(CALLBACKS_RECEIVED)),
+        Family(RECEIPTS_FORWARDED, "counter", "Signed receipts forwarded to the platform, by outcome", counters.snapshot(RECEIPTS_FORWARDED)),
+    ]
+
+
+def gateway_reachable(config: AdapterConfig, client: httpx.Client) -> bool:
+    """The adapter's one critical dependency is the gateway, not PostgreSQL.
+
+    It holds no database credentials in any form, and the only thing it needs in
+    order to do its work is the platform's own entry point. The probe reuses the
+    receipt URL's origin, so there is no second piece of configuration to keep in
+    step with the first.
+    """
+    origin = httpx.URL(config.receipt_api_url).copy_with(path="/health/live", query=None)
+    try:
+        return client.get(origin, timeout=2).status_code == 200
+    except httpx.RequestError:
+        return False
+
 
 def create_app(config: AdapterConfig, client: httpx.Client) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+
+    # Mounted beside the callback route rather than served by a second listener:
+    # this process is already an HTTP server, on the internal port the contract
+    # names for it.
+    mount_observability(
+        app,
+        readiness=lambda: gateway_reachable(config, client),
+        metrics=metric_families,
+    )
 
     # Wrong path and wrong capability must both return an empty body (SPEC
     # "Неверный path или неверный сегмент дают 404 с пустым телом"), but
@@ -65,6 +105,8 @@ def create_app(config: AdapterConfig, client: httpx.Client) -> FastAPI:
         if callback is None:
             return Response(status_code=400, content=b"")
 
+        counters.increment(CALLBACKS_RECEIVED)
+
         receipt_body = build_receipt_bytes(callback)
         signature = sign_hex(config.hmac_secret, receipt_body)
 
@@ -85,7 +127,12 @@ def create_app(config: AdapterConfig, client: httpx.Client) -> FastAPI:
                 },
                 timeout=_HTTP_TIMEOUT_SECONDS,
             )
+            counters.increment(
+                RECEIPTS_FORWARDED,
+                {"outcome": "accepted" if platform_response.status_code < 400 else "rejected"},
+            )
         except httpx.RequestError:
+            counters.increment(RECEIPTS_FORWARDED, {"outcome": "unreachable"})
             # The one response this adapter ever fabricates itself -- every
             # other status/body/content-type is passed through verbatim
             # below, since a locally invented code here would hide a
@@ -104,17 +151,20 @@ def create_app(config: AdapterConfig, client: httpx.Client) -> FastAPI:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         config = load_adapter_config()
-    except MissingConfigError as exc:
-        logger.error(str(exc))
+    except (MissingConfigError, InvalidConfigError) as exc:
+        logger.error("invalid adapter configuration", extra={"error_code": type(exc).__name__})
         raise SystemExit(1) from exc
 
     with httpx.Client(follow_redirects=False) as client:
         app = create_app(config, client)
-        uvicorn.run(app, host="0.0.0.0", port=8082)
+        # Uvicorn's access log includes the full request path. The callback path
+        # contains a bearer capability, so it must never reach container logs.
+        # log_config=None preserves the JSON handler for application logs.
+        uvicorn.run(app, host="0.0.0.0", port=8082, log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

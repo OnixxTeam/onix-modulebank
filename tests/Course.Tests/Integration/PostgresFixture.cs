@@ -13,7 +13,7 @@ using Workflow.Core.Runtime;
 namespace Course.Tests.Integration;
 
 // Starts one isolated postgres:17-alpine container for the whole integration
-// test run (see AssemblyInfo.cs: parallelization is disabled so nothing else
+// test run, with both init scripts the image carries (see AssemblyInfo.cs: parallelization is disabled so nothing else
 // races this), runs the same role-creation script and checksummed migrations
 // bootstrap uses, publishes the real domain manifests plus the rollback-test
 // fixture actions, and exposes one connection string per application role --
@@ -26,6 +26,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     private const string WorkerPassword = "test-worker-password";
     private const string OutboxPassword = "test-outbox-password";
     private const string InboxPassword = "test-inbox-password";
+    private const string AutocheckPassword = "test-autocheck-password";
     private const string SuperuserPassword = "test-superuser-password";
     private const string DatabaseName = "course";
 
@@ -36,12 +37,27 @@ public sealed class PostgresFixture : IAsyncLifetime
         .WithEnvironment("COURSE_MIGRATOR_PASSWORD", MigratorPassword)
         .WithEnvironment("COURSE_PUBLISHER_PASSWORD", PublisherPassword)
         .WithEnvironment("COURSE_RUNTIME_PASSWORD", RuntimePassword)
-        .WithEnvironment("WORKFLOW_WORKER_PASSWORD", WorkerPassword)
+        .WithEnvironment("COURSE_WORKER_PASSWORD", WorkerPassword)
         .WithEnvironment("COURSE_OUTBOX_PASSWORD", OutboxPassword)
         .WithEnvironment("COURSE_INBOX_PASSWORD", InboxPassword)
+        .WithEnvironment("COURSE_AUTOCHECK_PASSWORD", AutocheckPassword)
+        // The reliability profile, exactly as compose.yaml passes it: the second init
+        // script turns these into database-level settings, and mounting it is what
+        // puts that production channel under test at all -- a test that only sets
+        // session values proves the functions read *a* setting, not that the
+        // container ever produces one.
+        .WithEnvironment("COURSE_OUTBOX_MAX_ATTEMPTS", "4")
+        .WithEnvironment("COURSE_OUTBOX_BACKOFF_BASE_MS", "200")
+        .WithEnvironment("COURSE_OUTBOX_BACKOFF_MAX_MS", "800")
+        .WithEnvironment("COURSE_OUTBOX_JITTER_MAX_MS", "100")
+        .WithEnvironment("COURSE_OUTBOX_LEASE_MS", "2000")
+        .WithEnvironment("COURSE_JOB_LEASE_MS", "2000")
         .WithResourceMapping(
             new FileInfo(RepoPaths.Combine("db", "init", "00-roles.sh")),
             new FileInfo("/docker-entrypoint-initdb.d/00-roles.sh"))
+        .WithResourceMapping(
+            new FileInfo(RepoPaths.Combine("db", "init", "01-reliability-profile.sh")),
+            new FileInfo("/docker-entrypoint-initdb.d/01-reliability-profile.sh"))
         .Build();
 
     public string RuntimeConnectionString => BuildConnectionString("course_runtime", RuntimePassword);
@@ -53,6 +69,11 @@ public sealed class PostgresFixture : IAsyncLifetime
     public string OutboxDispatcherConnectionString => BuildConnectionString("outbox_dispatcher", OutboxPassword);
 
     public string InboxReconcilerConnectionString => BuildConnectionString("inbox_reconciler", InboxPassword);
+
+    // The week-4 checker's own read-only channel (ticket 01): every statement
+    // of its run is `psql -U autocheck_reader`, so the role is part of the
+    // verifiable surface, not test scaffolding.
+    public string AutocheckReaderConnectionString => BuildConnectionString("autocheck_reader", AutocheckPassword);
 
     public IActionPublisher Publisher { get; private set; } = null!;
 
@@ -94,6 +115,8 @@ public sealed class PostgresFixture : IAsyncLifetime
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.apply_receipt.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "payment.complete.v1.action.json"));
         await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "receipt.accept.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "diagnostics.trace.v1.action.json"));
+        await PublishAndActivateAsync(RepoPaths.Combine("db", "manifests", "diagnostics.stalled.v1.action.json"));
         await PublishAndActivateAsync(TestManifests.ErrorAfterInsert());
         await PublishAndActivateAsync(TestManifests.UnknownOutcome());
         await PublishAndActivateAsync(TestManifests.EchoContext());

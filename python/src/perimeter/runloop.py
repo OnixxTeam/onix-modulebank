@@ -41,5 +41,5 @@ def log_and_wait_after_transient_db_error(
     Workflow.Worker's own claim loop (Workflow.Worker/WorkerLoop.cs) uses on
     the C# side, rather than crashing the process outright.
     """
-    logger.error("%s failed, will retry: %s", description, error)
+    logger.error("%s failed, will retry", description, extra={"error_code": type(error).__name__})
     time.sleep(poll_interval_seconds)

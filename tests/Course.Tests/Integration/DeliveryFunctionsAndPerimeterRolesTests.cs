@@ -23,14 +23,23 @@ namespace Course.Tests.Integration;
 // whether or not the pinned process exists yet, leaving an unresolvable one
 // RECEIVED rather than losing it.
 [Collection("integration")]
-public sealed class DeliveryFunctionsAndPerimeterRolesTests
+public sealed class DeliveryFunctionsAndPerimeterRolesTests : IDisposable
 {
     private readonly ApiFactory factory;
+
+    // One data source for the whole test rather than one per CreateLoop call:
+    // an undisposed data source per call holds its pooled connections open for
+    // the rest of the shared-container run, and this class drives the loop many
+    // times over.
+    private readonly NpgsqlDataSource workerDataSource;
 
     public DeliveryFunctionsAndPerimeterRolesTests(ApiFactory factory)
     {
         this.factory = factory;
+        workerDataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
     }
+
+    public void Dispose() => workerDataSource.Dispose();
 
     [Fact]
     public async Task ClaimOutbox_ReturnsAPendingRow_LeasedToTheCaller_WithTheContractShape()
@@ -161,22 +170,135 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests
         Assert.Equal("transport.error.retryable", row.LastErrorCode);
     }
 
+    // Ticket 19: the published test profile is four total attempts -- the first
+    // one plus three retries at 200/400/800 ms (docs/week3/07-autocheck-outline.md,
+    // "Максимум попыток Outbox 3"). The seeded policy used to be five attempts
+    // with five delays, which spends one extra request on a failing provider.
     [Fact]
-    public async Task FailOutbox_RetryableButBudgetExhausted_MovesToDead()
+    public async Task RetryProfile_IsFourTotalAttempts_WithThreeDelays()
+    {
+        var policy = await factory.Postgres.QueryAsOwnerAsync(async connection =>
+        {
+            await using var command = new NpgsqlCommand(
+                "select max_attempts, delays_ms::text from delivery.retry_policy where id = 1", connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            return (MaxAttempts: reader.GetInt32(0), DelaysMs: reader.GetString(1));
+        });
+
+        Assert.Equal(4, policy.MaxAttempts);
+        Assert.Equal([200, 400, 800], JsonNode.Parse(policy.DelaysMs)!.AsArray().Select(d => d!.GetValue<int>()));
+    }
+
+    [Fact]
+    public async Task FailOutbox_RetryableButBudgetExhausted_MovesToDeadAfterExactlyFourAttempts()
     {
         var (_, externalRequestId, _) = await PrepareExternalRequestAsync("3100.00");
 
         JsonNode last = new JsonObject();
-        for (var i = 0; i < 5; i++)
+        for (var i = 0; i < 3; i++)
         {
             await MakeDueNowAsync(externalRequestId);
             var claim = Assert.Single(await ClaimAsDispatcherAsync($"dispatcher-{i}", 10), r => r.ExternalRequestId == externalRequestId);
             last = await FailAsDispatcherAsync(claim.OutboxId, $"dispatcher-{i}", claim.LeaseVersion, "transport.error.retryable");
+            Assert.Equal("RETRY_WAIT", last["state"]!.GetValue<string>());
         }
 
+        await MakeDueNowAsync(externalRequestId);
+        var fourth = Assert.Single(await ClaimAsDispatcherAsync("dispatcher-4", 10), r => r.ExternalRequestId == externalRequestId);
+        last = await FailAsDispatcherAsync(fourth.OutboxId, "dispatcher-4", fourth.LeaseVersion, "transport.error.retryable");
+
         Assert.Equal("DEAD", last["state"]!.GetValue<string>());
+        Assert.Equal(4, last["attemptCount"]!.GetValue<int>());
         var state = await OutboxStateAsync(externalRequestId);
         Assert.Equal("DEAD", state.State);
+    }
+
+    [Fact]
+    public async Task FailOutbox_SchedulesTheProfileDelays_InOrder()
+    {
+        var (_, externalRequestId, _) = await PrepareExternalRequestAsync("3120.00");
+
+        foreach (var (attempt, expectedDelayMs) in new[] { (0, 200), (1, 400), (2, 800) })
+        {
+            await MakeDueNowAsync(externalRequestId);
+            var claim = Assert.Single(
+                await ClaimAsDispatcherAsync($"dispatcher-delay-{attempt}", 10), r => r.ExternalRequestId == externalRequestId);
+            await FailAsDispatcherAsync(claim.OutboxId, $"dispatcher-delay-{attempt}", claim.LeaseVersion, "transport.error.retryable");
+
+            // next_attempt_at was set to now() + delay + jitter one statement ago,
+            // so the remaining wait is that sum minus however long this round trip
+            // took. Week 4 added the jitter (ticket 04), which is why the ceiling is
+            // the delay plus the profile's jitter maximum rather than the delay
+            // itself; the floor keeps 100 ms of slack for a loaded CI container and
+            // still tells 200 from 400.
+            var jitterMaxMs = await factory.Postgres.ScalarAsOwnerAsync<int>(
+                "select profile.number('course.outbox_jitter_max_ms', 1)");
+            var scheduledInMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
+                "select (extract(epoch from (next_attempt_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
+                ("id", externalRequestId));
+            Assert.InRange(scheduledInMs, expectedDelayMs - 100, expectedDelayMs + jitterMaxMs);
+        }
+    }
+
+    // The lease was a literal `interval '30 seconds'` inside claim_outbox, so
+    // the profile could not reach it at all and a crashed owner held a delivery
+    // for 30 seconds even under the 2-second test profile. Since week 4 the
+    // effective value may come from a database setting (ticket 04) with the policy
+    // row as its fallback, so the expectation is read the same way the function
+    // reads it.
+    [Fact]
+    public async Task ClaimOutbox_TakesItsLeaseFromTheProfile_NotAHardcodedInterval()
+    {
+        var (_, externalRequestId, _) = await PrepareExternalRequestAsync("1700.00");
+
+        await ClaimAsDispatcherAsync("dispatcher-lease", 10);
+
+        var profileLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<int>(
+            "select profile.number('course.outbox_lease_ms', (select lease_ms from delivery.retry_policy where id = 1))");
+        var actualLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
+            "select (extract(epoch from (lease_expires_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
+            ("id", externalRequestId));
+
+        Assert.InRange(actualLeaseMs, profileLeaseMs - 500, profileLeaseMs);
+    }
+
+    // Called as course_publisher, the role bootstrap actually holds -- as the
+    // owner it would pass even without the schema USAGE grant EXECUTE alone
+    // does not imply, which is exactly how the first version of this shipped
+    // broken ("permission denied for schema delivery" on a clean boot).
+    [Fact]
+    public async Task SetLeaseMs_IsWhatTheProfileUsesOnTheNextClaim()
+    {
+        var original = await factory.Postgres.ScalarAsOwnerAsync<int>("select lease_ms from delivery.retry_policy where id = 1");
+        var (_, externalRequestId, _) = await PrepareExternalRequestAsync("1750.00");
+
+        try
+        {
+            var applied = await SetLeaseMsAsPublisherAsync(2000);
+            Assert.Equal("ok", applied["status"]!.GetValue<string>());
+
+            await ClaimAsDispatcherAsync("dispatcher-profile", 10);
+
+            var actualLeaseMs = await factory.Postgres.ScalarAsOwnerAsync<double>(
+                "select (extract(epoch from (lease_expires_at - now())) * 1000)::double precision from delivery.outbox where external_request_id = @id",
+                ("id", externalRequestId));
+            Assert.InRange(actualLeaseMs, 1_500, 2_000);
+        }
+        finally
+        {
+            await SetLeaseMsAsPublisherAsync(original);
+        }
+    }
+
+    private async Task<JsonNode> SetLeaseMsAsPublisherAsync(int leaseMs)
+    {
+        await using var connection = new NpgsqlConnection(factory.Postgres.PublisherConnectionString);
+        await connection.OpenAsync();
+
+        await using var command = new NpgsqlCommand("select delivery.set_lease_ms(@leaseMs)", connection);
+        command.Parameters.AddWithValue("leaseMs", leaseMs);
+        return JsonNode.Parse((string)(await command.ExecuteScalarAsync())!)!;
     }
 
     [Fact]
@@ -597,12 +719,11 @@ public sealed class DeliveryFunctionsAndPerimeterRolesTests
 
     private WorkerLoop CreateLoop()
     {
-        var dataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
         var validator = factory.Services.GetRequiredService<ISchemaValidator>();
         var actionExecutor = (PostgresActionExecutor)factory.Services.GetRequiredService<IActionExecutor>();
 
         return new WorkerLoop(
-            $"owner-{Guid.NewGuid():N}", dataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
+            $"owner-{Guid.NewGuid():N}", workerDataSource, factory.Postgres.JobRuntime, actionExecutor, validator, TimeProvider.System,
             new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes);
     }
 

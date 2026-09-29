@@ -45,8 +45,8 @@ public sealed class MapLoaderTests
     [Fact]
     public async Task JsonAndYamlFixture_ParseToTheSameDocument()
     {
-        var jsonPath = RepoPaths.Combine("autocheck", "fixtures", "maps", "3c363d117b40-v1.flow.json");
-        var yamlPath = RepoPaths.Combine("autocheck", "fixtures", "maps", "3c363d117b40-v1.flow.yaml");
+        var jsonPath = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "3c363d117b40-v1.flow.json");
+        var yamlPath = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "3c363d117b40-v1.flow.yaml");
 
         var fromJson = await MapLoader.LoadAsync(jsonPath, CancellationToken.None);
         var fromYaml = await MapLoader.LoadAsync(yamlPath, CancellationToken.None);
@@ -76,7 +76,7 @@ public sealed class GraphRulesTests
     [InlineData("unknown-start-step.flow.json", "flow.unknown_start_step")]
     public async Task SemanticFixture_TriggersExpectedGraphViolation(string fixtureName, string expectedCode)
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "invalid", "semantic", fixtureName);
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "invalid", "semantic", fixtureName);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 
@@ -88,7 +88,7 @@ public sealed class GraphRulesTests
     [Fact]
     public async Task ValidFixture_HasNoGraphViolations()
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "3c363d117b40-v1.flow.json");
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "3c363d117b40-v1.flow.json");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 
@@ -101,7 +101,7 @@ public sealed class MappingRulesTests
     [Fact]
     public async Task OverlappingMappingFixture_IsRejected()
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "invalid", "semantic", "overlapping-mapping.flow.json");
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "invalid", "semantic", "overlapping-mapping.flow.json");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 
@@ -113,7 +113,7 @@ public sealed class MappingRulesTests
     [Fact]
     public async Task ValidFixture_HasNoMappingViolations()
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "3c363d117b40-v1.flow.json");
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "3c363d117b40-v1.flow.json");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 
@@ -126,7 +126,7 @@ public sealed class RetryRulesTests
     [Fact]
     public async Task InvalidRetryFixture_IsRejected()
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "invalid", "semantic", "invalid-retry.flow.json");
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "invalid", "semantic", "invalid-retry.flow.json");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 
@@ -138,7 +138,7 @@ public sealed class RetryRulesTests
     [Fact]
     public async Task ValidFixture_HasNoRetryViolations()
     {
-        var path = RepoPaths.Combine("autocheck", "fixtures", "maps", "3c363d117b40-v1.flow.json");
+        var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "3c363d117b40-v1.flow.json");
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
         var map = MapParser.Parse(document);
 

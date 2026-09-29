@@ -228,7 +228,7 @@ public sealed class FlowPublishListActivateTests
     private static string NewFlowName() => $"probe-flow-{Guid.NewGuid():N}";
 
     private static string FixturePath(string fileName) =>
-        RepoPaths.Combine("autocheck", "fixtures", "maps", fileName);
+        RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", fileName);
 
     private static JsonNode BuildDocument(string flowName, int version)
     {
@@ -257,7 +257,7 @@ public sealed class FlowPublishListActivateTests
     {
         foreach (var name in new[] { "3c363d117b40.action.json", "3c363d117b40-disabled.action.json" })
         {
-            var path = RepoPaths.Combine("autocheck", "fixtures", "manifests", name);
+            var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "manifests", name);
             var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!;
             var manifest = ActionManifest.FromDocument(document);
 

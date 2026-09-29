@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "public_check.py"
-SPEC = importlib.util.spec_from_file_location("week2_public_check", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location("week3_public_check", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Cannot load public_check.py")
 public_check = importlib.util.module_from_spec(SPEC)
@@ -23,6 +24,23 @@ sys.modules[SPEC.name] = public_check
 SPEC.loader.exec_module(public_check)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+PACKAGE = Path(__file__).resolve().parents[2]
+
+
+class PackagingTests(unittest.TestCase):
+    def test_documented_shell_entrypoints_are_executable(self) -> None:
+        names = ("check.sh", "autocheck/check.sh", "autocheck/safe_compose.sh")
+        result = subprocess.run(
+            ["git", "ls-files", "--stage", "--error-unmatch", "--", *names],
+            cwd=PACKAGE, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            rows = result.stdout.splitlines()
+            self.assertEqual(len(rows), len(names))
+            self.assertTrue(all(row.split()[0] == "100755" for row in rows), rows)
+        else:
+            for name in names:
+                self.assertTrue((PACKAGE / name).stat().st_mode & 0o111, name)
 
 
 class FixtureTests(unittest.TestCase):
@@ -31,246 +49,795 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(
             fixture["digest"], public_check.canonical_fixture_digest(FIXTURES)
         )
-        self.assertTrue(fixture["files"]["invalidMaps"]["schema"])
-        self.assertTrue(fixture["files"]["invalidMaps"]["semantic"])
+        self.assertEqual(fixture["provider"]["image"], public_check.PROVIDER_IMAGE)
+        auto = json.loads(
+            (FIXTURES / fixture["files"]["reviewAutoRequest"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(auto["amount"], fixture["limit"]["amount"])
 
     def test_fixture_tampering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             copied = Path(temporary) / "fixtures"
             shutil.copytree(FIXTURES, copied)
-            signal = copied / "data" / "signal.json"
-            signal.write_text(
-                signal.read_text(encoding="utf-8") + " ", encoding="utf-8"
-            )
+            payload = copied / "data" / "request-provider.json"
+            payload.write_text('{"changed":true}\n', encoding="utf-8")
             with self.assertRaises(public_check.FixtureError):
                 public_check.load_fixture(copied)
 
-    def test_recomputed_digest_cannot_replace_published_fixture(self) -> None:
+    def test_fixture_path_escape_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             copied = Path(temporary) / "fixtures"
             shutil.copytree(FIXTURES, copied)
-            signal = copied / "data" / "signal.json"
-            signal.write_text('{"changed":true}\n', encoding="utf-8")
             metadata_path = copied / "fixture.json"
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            metadata["digest"] = public_check.canonical_fixture_digest(copied)
-            metadata_path.write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            metadata["files"]["providerRequest"] = "../outside.json"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with self.assertRaises(public_check.FixtureError):
-                public_check.load_fixture(copied)
+                public_check.canonical_fixture_digest(copied)
 
 
-class ParsingTests(unittest.TestCase):
-    def test_image_id_uses_compose_reference_before_containers_exist(self) -> None:
+class ReceiptContractTests(unittest.TestCase):
+    def test_legacy_mapping_and_exact_bytes(self) -> None:
+        legacy = {
+            "providerPaymentId": "provider-123",
+            "operationId": "external-123",
+            "result": "COMPLETED",
+            "message": "Payment completed",
+            "occurredAt": "2026-09-04T12:00:00.123Z",
+        }
+        receipt = public_check.normalized_receipt(legacy)
+        self.assertEqual(receipt["messageId"], "provider-123")
+        self.assertEqual(receipt["externalRequestId"], "external-123")
+        self.assertEqual(receipt["occurredAt"], legacy["occurredAt"])
+        self.assertNotIn("message", receipt)
+        self.assertEqual(
+            public_check.receipt_bytes(receipt),
+            b'{"externalRequestId":"external-123","messageId":"provider-123",'
+            b'"occurredAt":"2026-09-04T12:00:00.123Z","outcome":"COMPLETED",'
+            b'"providerPaymentId":"provider-123","version":1}',
+        )
+
+    def test_hmac_uses_raw_utf8_secret_and_exact_body(self) -> None:
+        body = b'{"version":1}'
+        expected = "v1=" + hashlib.sha256(b"not-the-hmac").hexdigest()
+        actual = public_check.receipt_signature(" raw-secret ", body)
+        self.assertTrue(actual.startswith("v1="))
+        self.assertNotEqual(actual, expected)
+        self.assertNotEqual(
+            actual,
+            public_check.receipt_signature("raw-secret", body),
+        )
+        self.assertNotEqual(
+            actual,
+            public_check.receipt_signature(" raw-secret ", body + b"\n"),
+        )
+
+    def test_unknown_fields_and_crlf_are_rejected(self) -> None:
+        base = {
+            "providerPaymentId": "provider-123",
+            "operationId": "external-123",
+            "result": "REJECTED",
+            "message": "Payment rejected",
+            "occurredAt": "2026-09-04T12:00:00Z",
+        }
+        with self.assertRaises(ValueError):
+            public_check.normalized_receipt({**base, "unknown": True})
+        for field in ("providerPaymentId", "operationId", "occurredAt", "message"):
+            for value in ("\rprefix", "middle\nvalue", "suffix\r"):
+                with self.subTest(field=field, value=repr(value)):
+                    with self.assertRaises(ValueError):
+                        public_check.normalized_receipt({**base, field: value})
+
+    def test_duplicate_and_conflict_keep_one_message_identity(self) -> None:
+        base = {
+            "providerPaymentId": "provider-123",
+            "operationId": "external-123",
+            "result": "COMPLETED",
+            "message": "Payment completed",
+            "occurredAt": "2026-09-04T12:00:00Z",
+        }
+        duplicate = dict(base)
+        conflict = {**base, "result": "REJECTED", "message": "Late rejection"}
+        first = public_check.normalized_receipt(base)
+        second = public_check.normalized_receipt(duplicate)
+        changed = public_check.normalized_receipt(conflict)
+        self.assertEqual(first["messageId"], second["messageId"])
+        self.assertEqual(first["messageId"], changed["messageId"])
+        self.assertEqual(
+            public_check.receipt_bytes(first), public_check.receipt_bytes(second)
+        )
+        self.assertNotEqual(
+            public_check.receipt_bytes(first), public_check.receipt_bytes(changed)
+        )
+
+    def test_external_text_id_is_validated_and_sql_encoded(self) -> None:
+        value = "external'; SELECT sensitive"
+        self.assertEqual(public_check.PublicChecker._text_id(value, "id"), value)
+        expression = public_check.PublicChecker._sql_text(value)
+        self.assertNotIn(value, expression)
+        self.assertNotIn(";", expression)
+        with self.assertRaises(public_check.ContractError):
+            public_check.PublicChecker._text_id("external\r\nheader", "id")
+
+
+class ComposeAdmissionTests(unittest.TestCase):
+    def _safe_config(self, repo: Path) -> dict[str, object]:
+        python_image = "candidate/python-integration:local"
+        return {
+            "services": {
+                "gateway": {
+                    "build": {"context": str(repo)},
+                    "ports": [{"published": "8080", "target": 8080}],
+                },
+                "api": {"build": {"context": str(repo)}},
+                "cli": {"image": "candidate/api:local"},
+                "postgres": {"image": "postgres:16"},
+                "worker-a": {"build": {"context": str(repo)}},
+                "worker-b": {"image": "candidate/worker:local"},
+                "outbox-dispatcher": {
+                    "image": python_image,
+                    "build": {"context": str(repo)},
+                    "environment": {"PGUSER": "outbox_dispatcher"},
+                },
+                "receipt-adapter": {
+                    "image": python_image,
+                    "environment": {"RECEIPT_API_URL": "http://gateway:8080"},
+                },
+                "inbox-reconciler": {
+                    "image": python_image,
+                    "environment": {"PGUSER": "inbox_reconciler"},
+                },
+                "provider-simulator": {
+                    "image": public_check.PROVIDER_IMAGE,
+                    "environment": {
+                        "CALLBACK_URL": (
+                            "http://receipt-adapter:8082/callbacks/provider-v02/"
+                        )
+                    },
+                },
+            },
+            "volumes": {"data": {}},
+        }
+
+    def test_safe_compose_contract_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            findings = public_check._compose_contract_findings(
+                self._safe_config(repo), repo
+            )
+            self.assertEqual(findings, [])
+
+    def test_gateway_default_published_port_is_detected(self) -> None:
+        service = {"ports": ["127.0.0.1:${COURSE_GATEWAY_PORT:-8080}:8080"]}
+        self.assertEqual(public_check._published_ports(service), {8080})
+        self.assertEqual(
+            public_check._published_ports({"ports": ["127.0.0.1:18080:8080"]}),
+            {18080},
+        )
+        self.assertEqual(
+            public_check._published_ports({"ports": ["18080-18082:8080-8082"]}),
+            {18080, 18081, 18082},
+        )
+
+    def test_source_and_runtime_gateway_ports_are_checked_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            source = self._safe_config(repo)
+            self.assertEqual(public_check._compose_contract_findings(source, repo), [])
+            runtime = json.loads(json.dumps(source))
+            runtime["services"]["gateway"]["ports"] = [
+                {"host_ip": "127.0.0.1", "published": "43123", "target": 8080}
+            ]
+            self.assertEqual(public_check._runtime_compose_findings(runtime, 43123), [])
+            self.assertTrue(public_check._compose_contract_findings(runtime, repo))
+
+    def test_candidate_config_forces_contract_port_before_runtime_override(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             harness = public_check.ComposeHarness(
                 repo=root,
-                fixtures=root,
                 compose_file=root / "compose.yaml",
-                compose_wrapper=root / "safe_compose.sh",
                 override_file=root / "override.yaml",
-                project="public-check-unit",
-                gateway_port=8080,
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=43123,
+                environment={"COURSE_GATEWAY_PORT": "43123"},
                 sensitive=(),
             )
-            config = public_check.CommandResult(
-                ("compose", "config"),
+            response = public_check.CommandResult(("compose",), 0, "{}", "")
+            with mock.patch.object(harness, "compose", return_value=response) as compose:
+                harness.candidate_config()
+            self.assertEqual(
+                compose.call_args.kwargs["environment"],
+                {"COURSE_GATEWAY_PORT": "8080"},
+            )
+
+    def test_digest_only_provider_reference_is_accepted(self) -> None:
+        digest = public_check.PROVIDER_IMAGE.rsplit("@", 1)[1]
+        reference = "ghcr.io/fintech-dev-lab/internship-provider-simulator@" + digest
+        self.assertTrue(public_check._provider_image_matches(reference))
+
+    def test_prebuilt_or_split_python_images_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["outbox-dispatcher"].pop("build")
+            services["receipt-adapter"]["image"] = "candidate/other:local"
+            findings = public_check._compose_contract_findings(config, repo)
+            rendered = "\n".join(findings)
+            self.assertIn("one shared image", rendered)
+            self.assertIn("locally built", rendered)
+
+    def test_adapter_database_configuration_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["environment"]["DATABASE_URL"] = "hidden"
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertTrue(
+                any("PostgreSQL configuration" in item for item in findings)
+            )
+
+    def test_adapter_credential_files_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["env_file"] = ["adapter.env"]
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertTrue(any("host-backed service" in item for item in findings))
+
+    def test_host_backed_compose_resources_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["api"]["build"] = {
+                "context": str(repo),
+                "dockerfile": "/tmp/external.Dockerfile",
+                "additional_contexts": {"home": "/home/user"},
+            }
+            config["secrets"] = {
+                "docker-auth": {"file": "/home/user/.docker/config.json"}
+            }
+            findings = public_check._compose_contract_findings(config, repo)
+            rendered = "\n".join(findings)
+            self.assertIn("external additional build context", rendered)
+            self.assertIn("external Dockerfile", rendered)
+            self.assertIn("host-backed resources", rendered)
+
+    def test_repository_local_additional_context_and_parent_dockerfile_are_accepted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["api"]["build"] = {
+                "context": str(repo / "src"),
+                "dockerfile": "../Dockerfile",
+                "additional_contexts": {"shared": str(repo / "shared")},
+            }
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertFalse(any("build context" in item for item in findings))
+            self.assertFalse(any("Dockerfile" in item for item in findings))
+
+    def test_python_database_principals_are_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["outbox-dispatcher"]["environment"] = {
+                "DATABASE_URL": "postgresql://postgres:secret@postgres/course"
+            }
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertTrue(
+                any(
+                    "database principal must be outbox_dispatcher" in item
+                    for item in findings
+                )
+            )
+
+    def test_adapter_connection_timeout_is_not_database_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["environment"]["HTTP_CONNECTION_TIMEOUT"] = "5"
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertFalse(
+                any("PostgreSQL configuration" in item for item in findings)
+            )
+
+    def test_adapter_libpq_dsn_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["environment"]["DB_DSN"] = (
+                "host=postgres dbname=course user=postgres password=secret"
+            )
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertTrue(
+                any("PostgreSQL configuration" in item for item in findings)
+            )
+
+    def test_synthetic_secret_distribution_is_restricted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            secret = "synthetic-hmac-secret"
+            services["receipt-adapter"]["environment"]["PROVIDER_HMAC_SECRET"] = secret
+            services["outbox-dispatcher"]["environment"]["LEAK"] = secret
+            services["api"]["build"] = {
+                "context": str(repo),
+                "args": {"LEAK": secret},
+            }
+            findings = public_check._secret_distribution_findings(
+                config,
+                {
+                    "provider-hmac-secret": (
+                        secret,
+                        {
+                            ("api", "PROVIDER_HMAC_SECRET"),
+                            ("receipt-adapter", "PROVIDER_HMAC_SECRET"),
+                        },
+                    )
+                },
+            )
+            self.assertEqual(len(findings), 2)
+            self.assertTrue(any("outbox-dispatcher.LEAK" in item for item in findings))
+            self.assertTrue(any("outside api environment" in item for item in findings))
+
+    def test_database_secret_allows_recipient_environment_only(self) -> None:
+        secret = "synthetic-database-secret"
+        config = {
+            "services": {
+                "postgres": {"environment": {"ROLE_PASSWORD": secret}},
+                "worker-a": {"environment": {"COURSE_DB_PASSWORD": secret}},
+                "receipt-adapter": {"environment": {"LEAK": secret}},
+            }
+        }
+        findings = public_check._secret_distribution_findings(
+            config,
+            {
+                "worker-password": (
+                    secret,
+                    {("postgres", "*"), ("worker-a", "*")},
+                )
+            },
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("receipt-adapter.LEAK", findings[0])
+
+    def test_cli_is_declared_but_not_required_to_keep_running(self) -> None:
+        self.assertIn("cli", public_check.REQUIRED_SERVICES)
+        self.assertNotIn("cli", public_check.RUNNING_SERVICES)
+
+    def test_host_escape_and_extra_ports_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["privileged"] = True
+            services["receipt-adapter"]["ports"] = [
+                {"published": "8082", "target": 8082}
+            ]
+            services["outbox-dispatcher"]["volumes"] = ["/var/run/docker.sock:/x"]
+            findings = public_check._compose_contract_findings(config, repo)
+            rendered = "\n".join(findings)
+            self.assertIn("host/elevated", rendered)
+            self.assertIn("only gateway", rendered)
+            self.assertIn("bind mount", rendered)
+            self.assertIn("Docker socket", rendered)
+
+    def test_short_port_publication_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            config = self._safe_config(repo)
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["receipt-adapter"]["ports"] = ["8082"]
+            findings = public_check._compose_contract_findings(config, repo)
+            self.assertTrue(any("only gateway" in item for item in findings))
+
+    def test_callback_base_preserves_candidate_internal_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self._safe_config(Path(temporary))
+            services = config["services"]
+            assert isinstance(services, dict)
+            services["provider-simulator"]["environment"]["CALLBACK_URL"] = (
+                "http://receipt-adapter:9123/callbacks/provider-v02/candidate"
+            )
+            self.assertEqual(
+                public_check._provider_callback_base(config),
+                "http://receipt-adapter:9123/callbacks/provider-v02",
+            )
+
+    def test_override_configures_all_csharp_application_services(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checker = public_check.PublicChecker.__new__(public_check.PublicChecker)
+            checker.override = root / "override.yaml"
+            checker.project = "public-test"
+            checker.callback_base = "http://receipt-adapter:9123/callbacks/provider-v02"
+            checker._write_override(self._safe_config(root))
+            rendered = checker.override.read_text(encoding="utf-8")
+            for service in ("gateway", "api", "cli", "worker-a", "worker-b"):
+                remainder = rendered.split(f"  {service}:\n", 1)[1]
+                section_lines: list[str] = []
+                for line in remainder.splitlines():
+                    if line.startswith("  ") and not line.startswith("    "):
+                        break
+                    section_lines.append(line)
+                section = "\n".join(section_lines)
+                self.assertIn("COURSE_JWT_ISSUER", section)
+                self.assertIn("COURSE_JWT_AUDIENCE", section)
+                self.assertIn("COURSE_JWT_SIGNING_KEY", section)
+                self.assertIn("COURSE_TEST_PROFILE", section)
+            self.assertIn(
+                "http://receipt-adapter:9123/callbacks/provider-v02/"
+                "${PROVIDER_CALLBACK_CAPABILITY}",
+                rendered,
+            )
+
+    def test_internal_http_probe_script_is_valid_python(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = public_check.ComposeHarness(
+                repo=root,
+                compose_file=root / "compose.yaml",
+                override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=8080,
+                environment={},
+                sensitive=(),
+            )
+            response = public_check.CommandResult(
+                ("compose",),
                 0,
-                json.dumps({"services": {"api": {"build": {"context": "."}}}}),
+                '{"status":204,"data":"","headers":{}}\n',
                 "",
             )
-            digest = "a" * 64
-            inspected = public_check.CommandResult(
-                ("docker", "image", "inspect"), 0, f"sha256:{digest}\n", ""
-            )
-            with (
-                mock.patch.object(harness, "compose", return_value=config),
-                mock.patch.object(harness, "run", return_value=inspected) as run,
-            ):
-                self.assertEqual(harness.image_id("api"), f"sha256:{digest}")
-        self.assertEqual(run.call_args.args[0][-1], "public-check-unit-api")
+            with mock.patch.object(
+                harness, "compose", return_value=response
+            ) as compose:
+                result = harness.internal_http(
+                    "receipt-adapter",
+                    "POST",
+                    "http://127.0.0.1:8082/callbacks/provider-v02/test",
+                    body={"value": True},
+                )
+            self.assertEqual(result.status, 204)
+            script = compose.call_args.args[0][5]
+            compile(script, "<internal-http-probe>", "exec")
 
-    def test_structured_failpoint_parsing(self) -> None:
-        logs = "\n".join(
-            (
-                "worker-a | not json",
-                'worker-a | {"event":"other","name":"after_job_claim","instanceId":"worker-a"}',
-                'worker-a | {"event":"failpoint.reached","name":"after_job_claim","instanceId":"worker-a"}',
-                'worker-a | {"event":"failpoint.reached","name":"different","instanceId":"worker-a"}',
-            )
-        )
-        self.assertEqual(
-            public_check.parse_failpoint_acks(logs, "after_job_claim"),
-            [
-                {
-                    "event": "failpoint.reached",
-                    "name": "after_job_claim",
-                    "instanceId": "worker-a",
-                }
-            ],
-        )
-
-    def test_cli_json_requires_one_exact_object(self) -> None:
-        self.assertEqual(
-            public_check.extract_cli_json('  {"status":"ok"}\n'), {"status": "ok"}
-        )
-        self.assertIsNone(public_check.extract_cli_json('log\n{"status":"ok"}'))
-        self.assertIsNone(public_check.extract_cli_json("[]"))
-        self.assertIsNone(public_check.extract_cli_json(""))
-
-    def test_duplicate_failpoint_acknowledgement_is_rejected(self) -> None:
+    def test_python_runtime_detection_accepts_312(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             harness = public_check.ComposeHarness(
                 repo=root,
-                fixtures=root,
                 compose_file=root / "compose.yaml",
-                compose_wrapper=root / "wrapper.sh",
                 override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
                 project="project",
                 gateway_port=8080,
+                environment={},
                 sensitive=(),
             )
-            line = (
-                '{"event":"failpoint.reached","name":"after_job_claim",'
-                '"instanceId":"worker-a"}\n'
+            process = public_check.CommandResult(
+                ("docker", "inspect"),
+                0,
+                "/usr/local/bin/python3.12\n",
+                "",
             )
-            duplicate = public_check.CommandResult(
-                ("docker", "compose", "logs"), 0, line + line, ""
-            )
-            with mock.patch.object(harness, "compose", return_value=duplicate):
-                with self.assertRaises(public_check.ContractError):
-                    harness.wait_failpoint("worker-a", "after_job_claim")
-                with self.assertRaises(public_check.ContractError):
-                    harness.wait_single_winner(
-                        ("worker-a", "worker-b"), "after_job_claim"
-                    )
-
-    def test_worker_addresses_are_read_from_docker_inspect(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            harness = public_check.ComposeHarness(
-                repo=root,
-                fixtures=root,
-                compose_file=root / "compose.yaml",
-                compose_wrapper=root / "wrapper.sh",
-                override_file=root / "override.yaml",
-                project="project",
-                gateway_port=8080,
-                sensitive=(),
-            )
-            container = public_check.CommandResult(
-                ("docker", "compose", "ps"), 0, "a" * 64 + "\n", ""
-            )
-            inspected = public_check.CommandResult(
-                ("docker", "inspect"), 0, "172.20.0.3\n\n", ""
+            version = public_check.CommandResult(
+                ("docker", "exec"), 0, "Python 3.12.7\n", ""
             )
             with (
-                mock.patch.object(harness, "compose", return_value=container),
-                mock.patch.object(harness, "run", return_value=inspected) as run,
+                mock.patch.object(harness, "container_id", return_value="a" * 64),
+                mock.patch.object(harness, "run", side_effect=[process, version]),
             ):
-                succeeded, addresses = harness._service_addresses("worker-a")
-            self.assertTrue(succeeded)
-            self.assertEqual(addresses, {"172.20.0.3"})
+                actual = harness.detect_python_runtime("receipt-adapter")
+            self.assertEqual(actual, (3, 12, 7))
             self.assertEqual(
-                run.call_args.args[0][:3], ["docker", "inspect", "--format"]
+                harness.python_executables["receipt-adapter"],
+                "/usr/local/bin/python3.12",
+            )
+
+    def test_python_runtime_detection_rejects_dormant_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = public_check.ComposeHarness(
+                repo=root,
+                compose_file=root / "compose.yaml",
+                override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=8080,
+                environment={},
+                sensitive=(),
+            )
+            process = public_check.CommandResult(
+                ("docker", "inspect"),
+                0,
+                "dotnet\n",
+                "",
+            )
+            with (
+                mock.patch.object(harness, "container_id", return_value="a" * 64),
+                mock.patch.object(harness, "run", return_value=process),
+                self.assertRaises(public_check.ContractError),
+            ):
+                harness.detect_python_runtime("receipt-adapter")
+
+    def test_main_process_detection_accepts_init_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = public_check.ComposeHarness(
+                repo=root,
+                compose_file=root / "compose.yaml",
+                override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=8080,
+                environment={},
+                sensitive=(),
+            )
+            responses = [
+                public_check.CommandResult(("docker", "inspect"), 0, "tini\n", ""),
+                public_check.CommandResult(("docker", "inspect"), 0, "100\n", ""),
+                public_check.CommandResult(
+                    ("docker", "top"),
+                    0,
+                    "PID PPID COMMAND\n100 1 tini\n101 100 python3.12\n",
+                    "",
+                ),
+            ]
+            with (
+                mock.patch.object(harness, "container_id", return_value="a" * 64),
+                mock.patch.object(harness, "run", side_effect=responses),
+            ):
+                self.assertEqual(
+                    harness.main_process_executable("receipt-adapter"), "python3.12"
+                )
+
+    def test_process_probe_requests_pid_for_docker_top(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = public_check.ComposeHarness(
+                repo=root,
+                compose_file=root / "compose.yaml",
+                override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=8080,
+                environment={},
+                sensitive=(),
+            )
+            response = public_check.CommandResult(
+                ("docker", "top"),
+                0,
+                "PID COMMAND COMMAND\n1 python python -m app\n",
+                "",
+            )
+            with (
+                mock.patch.object(harness, "container_id", return_value="a" * 64),
+                mock.patch.object(harness, "run", return_value=response) as run,
+            ):
+                self.assertIn("python", harness.process_text("receipt-adapter"))
+            self.assertEqual(run.call_args.args[0][-2:], ("-eo", "pid,comm,args"))
+
+    def test_candidate_http_transport_failure_is_contract_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = public_check.ComposeHarness(
+                repo=root,
+                compose_file=root / "compose.yaml",
+                override_file=root / "override.yaml",
+                wrapper=root / "wrapper.sh",
+                project="project",
+                gateway_port=8080,
+                environment={},
+                sensitive=(),
+            )
+            error = public_check.urllib.error.URLError("connection refused")
+            with mock.patch.object(
+                public_check.urllib.request, "urlopen", side_effect=error
+            ):
+                with self.assertRaises(public_check.ContractError):
+                    harness.http("GET", "/health/ready")
+
+
+class PollingTests(unittest.TestCase):
+    def test_poll_timeout_rejects_stale_rows(self) -> None:
+        checker = public_check.PublicChecker.__new__(public_check.PublicChecker)
+        checker.harness = mock.Mock()
+        checker.harness.psql_rows.return_value = [{"status": "PROCESSING"}]
+        with (
+            mock.patch.object(
+                public_check.time, "monotonic", side_effect=[0.0, 0.1, 2.0]
+            ),
+            mock.patch.object(public_check.time, "sleep"),
+            self.assertRaisesRegex(
+                public_check.ContractError, "timed out waiting for candidate evidence"
+            ),
+        ):
+            checker._poll_rows(
+                "SELECT status",
+                lambda rows: rows[0].get("status") == "COMPLETED",
+                timeout=1.0,
             )
 
 
-class QueryTests(unittest.TestCase):
-    def test_stable_view_and_fixture_queries_are_allowed(self) -> None:
-        public_check.validate_read_only_query(
-            "SELECT a.attempt_id FROM autocheck.attempts a "
-            "JOIN autocheck.jobs j ON j.job_id = a.job_id"
-        )
-        public_check.validate_read_only_query(
-            "SELECT execution_id FROM probe_test.effect_test",
-            ("probe_test", "effect_test"),
-        )
-        public_check.validate_read_only_query(
-            "SELECT has_table_privilege(r.oid, c.oid, 'INSERT') AS has_insert "
-            "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles r ON true"
-        )
+class ActionResultTests(unittest.TestCase):
+    def test_repeat_ignores_transport_meta_but_not_business_result(self) -> None:
+        first = {
+            "status": "ok",
+            "outcome": "APPROVED",
+            "result": {"decision": "APPROVED"},
+            "meta": {"correlationId": "first"},
+        }
+        repeated = {**first, "meta": {"correlationId": "second"}}
+        changed = {**repeated, "result": {"decision": "REJECTED"}}
+        self.assertTrue(public_check.same_action_result(first, repeated))
+        self.assertFalse(public_check.same_action_result(first, changed))
 
-    def test_mutating_or_unpublished_queries_are_rejected(self) -> None:
-        invalid = (
-            "UPDATE autocheck.jobs SET state = 'READY'",
-            "SELECT * FROM workflow.jobs",
-            "SELECT * FROM autocheck.jobs; SELECT 1",
-            "SELECT * FROM autocheck.jobs -- comment",
+
+class ProjectionContractTests(unittest.TestCase):
+    def test_published_column_types_are_explicit(self) -> None:
+        self.assertEqual(public_check._expected_column_type("process_id"), "uuid")
+        self.assertEqual(
+            public_check._expected_column_type("received_at"),
+            "timestamp with time zone",
         )
-        for query in invalid:
-            with self.subTest(query=query):
-                with self.assertRaises(ValueError):
-                    public_check.validate_read_only_query(query)
+        self.assertEqual(public_check._expected_column_type("lease_version"), "bigint")
+        self.assertEqual(public_check._expected_column_type("outcomes"), "jsonb")
+        self.assertEqual(public_check._expected_column_type("message_id"), "text")
+
+
+class MachineArtifactTests(unittest.TestCase):
+    def test_all_json_contracts_are_objects(self) -> None:
+        for path in (PACKAGE / "contracts" / "course-1").glob("*.json"):
+            with self.subTest(path=path.name):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIsInstance(value, dict)
+
+    def test_score_manifest_sums_to_25(self) -> None:
+        path = PACKAGE / "contracts" / "course-1" / "week-3-score-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["manifestVersion"], "week-3.1")
+        self.assertEqual(sum(item["weight"] for item in manifest["criteria"]), 25)
+        self.assertEqual(
+            {item["id"] for item in manifest["criteria"]},
+            {"BNK-01", "BNK-02", "BNK-03", "BNK-04", "BNK-05", "PG-02", "PG-05"},
+        )
+    def test_published_schema_set_is_complete(self) -> None:
+        names = [
+            "payment-submit.payload.schema.json",
+            "payment-submit.result.schema.json",
+            "workflow-manual.payload.schema.json",
+            "workflow-manual.result.schema.json",
+            "provider-v02-payment-request.schema.json",
+            "provider-v02-callback.schema.json",
+            "receipt-v1.schema.json",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertIsInstance(
+                    json.loads(
+                        (PACKAGE / "contracts" / "course-1" / name).read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    dict,
+                )
+
+    def test_crlf_is_rejected_at_every_position(self) -> None:
+        protected = {
+            "provider-v02-payment-request.schema.json": ("operationId",),
+            "provider-v02-callback.schema.json": (
+                "providerPaymentId",
+                "operationId",
+                "message",
+                "occurredAt",
+            ),
+            "receipt-v1.schema.json": (
+                "externalRequestId",
+                "messageId",
+                "occurredAt",
+                "providerPaymentId",
+            ),
+        }
+        for name, fields in protected.items():
+            schema = json.loads(
+                (PACKAGE / "contracts" / "course-1" / name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            for field in fields:
+                pattern = schema["properties"][field]["not"]["pattern"]
+                self.assertIsNone(re.search(pattern, "valid-value"))
+                for value in ("\rprefix", "middle\nvalue", "suffix\r"):
+                    with self.subTest(schema=name, field=field, value=repr(value)):
+                        self.assertIsNotNone(re.search(pattern, value))
+
+    def test_provider_payment_id_is_required_string(self) -> None:
+        schema = json.loads(
+            (PACKAGE / "contracts" / "course-1" / "receipt-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(schema["properties"]["providerPaymentId"]["type"], "string")
+
+
+class WrapperTests(unittest.TestCase):
+    def test_wrapper_documents_external_repository_argument(self) -> None:
+        completed = subprocess.run(
+            [str(PACKAGE / "check.sh"), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("--repo PATH", completed.stdout)
+
+    def test_safe_compose_passes_documented_configuration(self) -> None:
+        script = (PACKAGE / "autocheck" / "safe_compose.sh").read_text(
+            encoding="utf-8"
+        )
+        for name in (
+            "COURSE_POSTGRES_PASSWORD",
+            "COURSE_OUTBOX_PASSWORD",
+            "COURSE_INBOX_PASSWORD",
+            "PROVIDER_URL",
+            "OUTBOX_OWNER",
+            "RECEIPT_API_URL",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(f'{name}="${{{name}:-}}"', script)
 
 
 class ReportTests(unittest.TestCase):
     def test_report_shape_and_redaction(self) -> None:
-        secret = "synthetic-sensitive-value"
-        checks = [
-            {
-                "name": "sample",
-                "phase": "admission",
-                "status": "passed",
-                "expected": "safe",
-                "actual": public_check._redact(
-                    {
-                        "signingKey": secret,
-                        "message": f"prefix {secret} suffix",
-                    },
-                    (secret,),
-                ),
-            }
-        ]
-        report = public_check.build_report(
-            started_at="2026-08-29T00:00:00+00:00",
-            finished_at="2026-08-29T00:00:01+00:00",
-            status="passed",
-            checks=checks,
-            commands=[
-                {"command": ["docker", "compose"], "exitCode": 0, "timedOut": False}
-            ],
-        )
-        self.assertEqual(
-            set(report),
-            {
-                "manifestVersion",
-                "toolVersion",
-                "timestamps",
-                "status",
-                "checks",
-                "failedChecks",
-                "commands",
-            },
-        )
-        self.assertFalse(public_check.report_has_forbidden_keys(report))
-        self.assertTrue(public_check.report_has_forbidden_keys({"Sc" + "ore": 1}))
-        self.assertNotIn(secret, json.dumps(report))
-        self.assertEqual(report["failedChecks"], [])
-
-    def test_failed_check_is_named_in_summary(self) -> None:
+        secret = "synthetic-secret-value"
         report = public_check.build_report(
             started_at="start",
             finished_at="finish",
-            status="failed",
+            status="passed",
             checks=[
                 {
-                    "name": "broken-contract",
-                    "phase": "execution",
-                    "status": "failed",
+                    "name": "safe",
+                    "phase": "security",
+                    "status": "passed",
                     "expected": True,
-                    "actual": False,
+                    "actual": public_check._redact(f"prefix {secret}", (secret,)),
                 }
             ],
             commands=[],
         )
-        self.assertEqual(report["failedChecks"], ["broken-contract"])
+        self.assertFalse(public_check.report_has_forbidden_keys(report))
+        self.assertNotIn(secret, json.dumps(report))
+        self.assertTrue(public_check.report_has_forbidden_keys({"sco" + "re": 1}))
 
-    def test_report_write_replaces_hard_link_without_truncating_target(self) -> None:
+    def test_report_write_replaces_hardlink_without_truncating_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "target.txt"
@@ -283,6 +850,17 @@ class ReportTests(unittest.TestCase):
                 json.loads(report_path.read_text(encoding="utf-8")),
                 {"status": "passed"},
             )
+
+    def test_report_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.txt"
+            target.write_text("sentinel\n", encoding="utf-8")
+            report_path = root / "report.json"
+            report_path.symlink_to(target)
+            with self.assertRaises(public_check.EnvironmentFailure):
+                public_check._write_report(report_path, {"status": "passed"})
+            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel\n")
 
 
 class ExitCodeTests(unittest.TestCase):
@@ -306,597 +884,6 @@ class ExitCodeTests(unittest.TestCase):
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(code, 1)
             self.assertEqual(report["status"], "failed")
-
-    def test_missing_trusted_wrapper_is_initialization_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
-            output = root / "report.json"
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = public_check.main(
-                    [
-                        "--repo",
-                        str(root),
-                        "--fixtures",
-                        str(FIXTURES),
-                        "--output",
-                        str(output),
-                        "--compose-wrapper",
-                        str(root / "missing-safe-compose.sh"),
-                    ]
-                )
-            report = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(code, 2)
-            self.assertEqual(report["status"], "error")
-
-    def test_report_symlink_is_rejected_without_overwriting_target(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            target = root / "target.txt"
-            target.write_text("sentinel\n", encoding="utf-8")
-            output = root / "report.json"
-            output.symlink_to(target)
-            with (
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
-                code = public_check.main(
-                    [
-                        "--repo",
-                        str(root),
-                        "--fixtures",
-                        str(FIXTURES),
-                        "--output",
-                        str(output),
-                        "--compose-wrapper",
-                        str(MODULE_PATH.with_name("safe_compose.sh")),
-                    ]
-                )
-            self.assertEqual(code, 2)
-            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel\n")
-
-
-class AdmissionSafetyTests(unittest.TestCase):
-    def test_safe_compose_model_is_accepted(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            config = {
-                "services": {
-                    "api": {
-                        "build": {"context": str(repo)},
-                    }
-                },
-                "volumes": {"data": {"name": "project_data"}},
-            }
-            self.assertEqual(public_check._unsafe_compose_findings(config, repo), [])
-
-    def test_readme_sections_do_not_require_one_heading_hierarchy(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            sections = "\n".join(
-                f"## {name.title()}\ncontent" for name in public_check.SOLUTION_HEADINGS
-            )
-            (repo / "README.md").write_text(
-                f"# Solution\n{sections}\ndocker compose up -d --build\n./check.sh\n",
-                encoding="utf-8",
-            )
-            checker = object.__new__(public_check.PublicChecker)
-            checker.repo = repo
-            with mock.patch.object(
-                checker, "_tracked_paths", return_value=["README.md", ".gitignore"]
-            ):
-                self.assertEqual(checker._admission_text_findings(), [])
-
-    def test_host_escape_compose_options_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            config = {
-                "services": {
-                    "api": {
-                        "container_name": "global-api",
-                        "network_mode": "host",
-                        "device_cgroup_rules": ["b 8:* rmw"],
-                        "use_api_socket": True,
-                        "volumes_from": ["container:external"],
-                        "provider": {"type": "external"},
-                        "external_links": ["other:alias"],
-                        "logging": {"driver": "syslog"},
-                        "security_opt": ["seccomp=unconfined"],
-                        "build": {
-                            "context": "../outside",
-                            "ssh": ["default"],
-                            "tags": ["global:latest"],
-                        },
-                    }
-                },
-                "volumes": {"data": {"external": True, "name": "global-data"}},
-                "networks": {
-                    "host-lan": {"driver": "macvlan"},
-                    "custom": {"driver": "bridge", "ipam": {"config": []}},
-                },
-            }
-            findings = public_check._unsafe_compose_findings(config, repo)
-            rendered = "\n".join(findings)
-            for expected in (
-                "unsafe network_mode",
-                "elevated device",
-                "Docker API socket",
-                "volumes_from",
-                "external service provider",
-                "external_links",
-                "external logging driver",
-                "unconfined",
-                "external build context",
-                "unsafe build privilege",
-                "unsafe build exporter/tag",
-                "external resource",
-                "unsafe network driver",
-                "unsafe network options",
-            ):
-                with self.subTest(expected=expected):
-                    self.assertIn(expected, rendered)
-
-    def test_repository_bind_mount_is_rejected_even_when_read_only(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            source = repo / "config"
-            source.mkdir()
-            config = {
-                "services": {
-                    "api": {
-                        "volumes": [
-                            {
-                                "type": "bind",
-                                "source": str(source),
-                                "read_only": True,
-                            }
-                        ]
-                    }
-                }
-            }
-            findings = public_check._unsafe_compose_findings(config, repo)
-            self.assertIn("api: repository bind mount", findings)
-
-    def test_repository_config_and_secret_files_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            config = {
-                "services": {},
-                "configs": {"settings": {"file": str(repo / "settings.json")}},
-                "secrets": {"key": {"file": str(repo / "key.txt")}},
-            }
-            findings = public_check._unsafe_compose_findings(config, repo)
-            self.assertIn("configs.settings: repository file mount", findings)
-            self.assertIn("secrets.key: repository file mount", findings)
-
-    def test_volume_driver_options_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            config = {
-                "services": {"postgres": {"volumes": ["data:/var/lib/postgresql"]}},
-                "volumes": {
-                    "data": {
-                        "driver": "local",
-                        "driver_opts": {
-                            "type": "none",
-                            "o": "bind",
-                            "device": "/etc",
-                        },
-                    }
-                },
-            }
-            findings = public_check._unsafe_compose_findings(config, repo)
-            self.assertIn("volumes.data: unsafe volume driver/options", findings)
-
-    def test_compose_include_and_extends_are_rejected_before_resolution(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            compose_file = Path(temporary) / "compose.yaml"
-            compose_file.write_text(
-                "include:\n  - ../external.yaml\nservices:\n  api:\n    extends:\n      file: ../base.yaml\n",
-                encoding="utf-8",
-            )
-            findings = public_check._raw_compose_findings(compose_file)
-            self.assertEqual(len(findings), 2)
-            self.assertTrue(any("include" in item for item in findings))
-            self.assertTrue(any("extends" in item for item in findings))
-            compose_file.write_text(
-                "{include: [../external.yaml], services: {api: {extends: {file: ../base.yaml}}}}\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(len(public_check._raw_compose_findings(compose_file)), 2)
-
-    def test_candidate_config_does_not_use_trusted_override(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            compose_file = root / "compose.yaml"
-            override = root / "override.yaml"
-            wrapper = root / "safe_compose.sh"
-            for path in (compose_file, override, wrapper):
-                path.write_text("", encoding="utf-8")
-            harness = public_check.ComposeHarness(
-                repo=root,
-                fixtures=root,
-                compose_file=compose_file,
-                compose_wrapper=wrapper,
-                override_file=override,
-                project="project",
-                gateway_port=8080,
-                sensitive=(),
-            )
-            result = public_check.CommandResult(("docker",), 0, "{}", "")
-            with mock.patch.object(harness, "run", return_value=result) as run:
-                harness.compose_candidate(["config", "--format", "json"])
-            command = run.call_args.args[0]
-            self.assertIn(str(compose_file), command)
-            self.assertNotIn(str(override), command)
-
-    def test_dotnet_detection_requires_final_stage_lineage(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            (repo / "Api.csproj").write_text("<Project />\n", encoding="utf-8")
-            dockerfile = repo / "Dockerfile"
-            service = {"build": {"context": ".", "dockerfile": "Dockerfile"}}
-            dockerfile.write_text(
-                "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS unused\n"
-                "FROM python:3.13\n"
-                'ENTRYPOINT ["python", "app.py"]\n',
-                encoding="utf-8",
-            )
-            self.assertFalse(public_check._dotnet_build_declared(service, repo))
-            dockerfile.write_text(
-                "FROM python:3.13 AS selected\n"
-                'ENTRYPOINT ["python", "app.py"]\n'
-                "FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final\n"
-                'ENTRYPOINT ["dotnet", "Api.dll"]\n',
-                encoding="utf-8",
-            )
-            targeted_service = {
-                "build": {
-                    "context": ".",
-                    "dockerfile": "Dockerfile",
-                    "target": "selected",
-                }
-            }
-            self.assertFalse(
-                public_check._dotnet_build_declared(targeted_service, repo)
-            )
-            dockerfile.write_text(
-                "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build\n"
-                "FROM debian:bookworm-slim\n"
-                "COPY --from=build /app /app\n"
-                'ENTRYPOINT ["/app/Api"]\n',
-                encoding="utf-8",
-            )
-            self.assertTrue(public_check._dotnet_build_declared(service, repo))
-            dockerfile.write_text(
-                "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS marker\n"
-                "FROM busybox:1.36 AS busybox\n"
-                "FROM debian:bookworm-slim\n"
-                "COPY --from=marker /tmp/marker /tmp/marker\n"
-                "COPY --from=busybox /bin/busybox /app/Api\n"
-                'ENTRYPOINT ["/app/Api", "httpd"]\n',
-                encoding="utf-8",
-            )
-            self.assertFalse(public_check._dotnet_build_declared(service, repo))
-
-    def test_override_resets_global_names_and_scopes_resources(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            checker = object.__new__(public_check.PublicChecker)
-            checker.project = "isolated-project"
-            checker.secret = "synthetic-secret"
-            checker.override = root / "override.yaml"
-            checker._write_override(
-                {
-                    "services": {
-                        "api": {
-                            "container_name": "global-api",
-                            "image": "candidate/api:latest",
-                            "build": {"context": "."},
-                        },
-                        "cli": {"image": "candidate/api:latest"},
-                        "worker-a": {},
-                        "worker-b": {},
-                        "gateway": {},
-                    },
-                    "volumes": {"data": {"name": "global-data"}},
-                    "networks": {"default": {"name": "global-network"}},
-                }
-            )
-            contents = checker.override.read_text(encoding="utf-8")
-            self.assertIn("container_name: !reset null", contents)
-            self.assertIn("isolated-project-volumes-1", contents)
-            self.assertIn("isolated-project-networks-1", contents)
-            self.assertNotIn("global-data", contents)
-            self.assertNotIn("global-network", contents)
-
-    @unittest.skipUnless(shutil.which("docker"), "Docker CLI is unavailable")
-    def test_generated_override_is_accepted_by_docker_compose(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            compose_file = root / "compose.yaml"
-            compose_file.write_text(
-                """services:
-  api:
-    image: candidate/api:latest
-    build: .
-    container_name: global-api
-  cli:
-    image: candidate/api:latest
-  gateway:
-    image: nginx:alpine
-    ports:
-      - "8080:8080"
-  postgres:
-    image: postgres:16
-    volumes:
-      - data:/var/lib/postgresql/data
-  worker-a:
-    image: candidate/worker:latest
-    build: .
-  worker-b:
-    image: candidate/worker:latest
-volumes:
-  data:
-    name: global-data
-""",
-                encoding="utf-8",
-            )
-            checker = object.__new__(public_check.PublicChecker)
-            checker.project = "isolated-project"
-            checker.secret = "synthetic-secret"
-            checker.override = root / "override.yaml"
-            config = {
-                "services": {
-                    "api": {
-                        "container_name": "global-api",
-                        "image": "candidate/api:latest",
-                        "build": {"context": str(root)},
-                    },
-                    "cli": {"image": "candidate/api:latest"},
-                    "gateway": {"image": "nginx:alpine"},
-                    "postgres": {"image": "postgres:16"},
-                    "worker-a": {
-                        "image": "candidate/worker:latest",
-                        "build": {"context": str(root)},
-                    },
-                    "worker-b": {"image": "candidate/worker:latest"},
-                },
-                "volumes": {"data": {"name": "global-data"}},
-            }
-            checker._write_override(config)
-            result = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "--project-name",
-                    checker.project,
-                    "-f",
-                    str(compose_file),
-                    "-f",
-                    str(checker.override),
-                    "config",
-                    "--format",
-                    "json",
-                ],
-                cwd=root,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            rendered = json.loads(result.stdout)
-            self.assertNotIn("container_name", rendered["services"]["api"])
-            self.assertEqual(
-                rendered["volumes"]["data"]["name"],
-                "isolated-project-volumes-1",
-            )
-
-    def test_shell_wrapper_rejects_trusted_argument_override(self) -> None:
-        result = subprocess.run(
-            [str(MODULE_PATH.parent / "check.sh"), "--repo", "/tmp/other"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("reserved", result.stderr)
-
-    def test_cleanup_is_not_run_before_scoped_override(self) -> None:
-        checker = object.__new__(public_check.PublicChecker)
-        checker.args = argparse.Namespace(keep_stack=False)
-        checker.cleanup_armed = False
-        checker.harness = mock.Mock()
-        self.assertIsNone(checker.cleanup())
-        checker.harness.compose.assert_not_called()
-
-    def test_docker_permission_and_capability_errors_are_environment_failures(
-        self,
-    ) -> None:
-        failures = (
-            "permission denied while trying to connect to the Docker daemon socket",
-            "unknown flag: --no-env-resolution",
-            "docker: 'compose' is not a docker command",
-            "unsupported tag !reset",
-        )
-        for message in failures:
-            with self.subTest(message=message):
-                result = public_check.CommandResult(("docker",), 1, "", message)
-                self.assertTrue(public_check.ComposeHarness._environment_error(result))
-
-
-class StatePredicateTests(unittest.TestCase):
-    def test_successful_job_attempt_projection(self) -> None:
-        job = {
-            "job_id": "job-1",
-            "execution_id": "execution-1",
-            "state": "SUCCEEDED",
-            "attempt_count": 2,
-            "lease_version": 2,
-        }
-        attempts = [
-            {
-                "attempt_id": "attempt-1",
-                "job_id": "job-1",
-                "execution_id": "execution-1",
-                "lease_version": 1,
-                "attempt_number": 1,
-                "status": "FAILED",
-                "outcome": None,
-                "error_code": "fixture.retry",
-                "started_at": "2026-08-29T00:00:00+00:00",
-                "finished_at": "2026-08-29T00:00:01+00:00",
-            },
-            {
-                "attempt_id": "attempt-2",
-                "job_id": "job-1",
-                "execution_id": "execution-1",
-                "lease_version": 2,
-                "attempt_number": 2,
-                "status": "SUCCEEDED",
-                "outcome": "ROUTED",
-                "error_code": None,
-                "started_at": "2026-08-29T00:00:02+00:00",
-                "finished_at": "2026-08-29T00:00:03+00:00",
-            },
-        ]
-        self.assertTrue(public_check.job_attempts_consistent(job, attempts, "ROUTED"))
-        attempts[1]["lease_version"] = 1
-        self.assertFalse(public_check.job_attempts_consistent(job, attempts, "ROUTED"))
-
-    def test_terminal_failure_and_process_state(self) -> None:
-        process = {"state": "FAILED", "current_step_key": "invoke"}
-        jobs = [
-            {
-                "job_id": "job-1",
-                "execution_id": "execution-1",
-                "state": "DEAD",
-                "attempt_count": 1,
-                "lease_version": 1,
-            }
-        ]
-        attempts = [
-            {
-                "attempt_id": "attempt-1",
-                "attempt_number": 1,
-                "job_id": "job-1",
-                "execution_id": "execution-1",
-                "lease_version": 1,
-                "status": "FAILED",
-                "outcome": None,
-                "error_code": "fixture.error",
-                "started_at": "2026-08-29T00:00:00+00:00",
-                "finished_at": "2026-08-29T00:00:01+00:00",
-            }
-        ]
-        self.assertTrue(
-            public_check.terminal_failure_consistent(
-                process,
-                jobs,
-                attempts,
-                [],
-                expected_attempts=1,
-                expected_error="fixture.error",
-            )
-        )
-        self.assertTrue(public_check.process_state_matches(process, "FAILED", "invoke"))
-        self.assertFalse(public_check.process_state_matches(process, "COMPLETED"))
-
-    def test_mixed_timezone_attempt_timestamps_are_candidate_failure(self) -> None:
-        job = {
-            "job_id": "job-1",
-            "execution_id": "execution-1",
-            "state": "SUCCEEDED",
-            "attempt_count": 1,
-            "lease_version": 1,
-        }
-        attempts = [
-            {
-                "attempt_id": "attempt-1",
-                "job_id": "job-1",
-                "execution_id": "execution-1",
-                "lease_version": 1,
-                "attempt_number": 1,
-                "status": "SUCCEEDED",
-                "outcome": "ROUTED",
-                "error_code": None,
-                "started_at": "2026-08-29T00:00:00",
-                "finished_at": "2026-08-29T00:00:01+00:00",
-            }
-        ]
-        self.assertFalse(public_check.job_attempts_consistent(job, attempts, "ROUTED"))
-
-    def test_exact_active_version(self) -> None:
-        rows = [
-            {"flow_version": 1, "status": "PUBLISHED", "is_active": False},
-            {"flow_version": 2, "status": "PUBLISHED", "is_active": True},
-        ]
-        self.assertTrue(public_check.exact_active_version(rows, 2))
-        rows[0]["is_active"] = True
-        self.assertFalse(public_check.exact_active_version(rows, 2))
-
-    def test_required_stable_view_schemas_allow_order_and_extra_columns(self) -> None:
-        rows = [
-            {
-                "view_name": view,
-                "relation_kind": "v",
-                "ordinal": ordinal,
-                "column_name": column,
-                "data_type": data_type,
-            }
-            for view, columns in public_check.AUTOCHECK_VIEW_SCHEMAS.items()
-            for ordinal, (column, data_type) in enumerate(columns, start=1)
-        ]
-        self.assertTrue(public_check.stable_view_schemas_match(rows))
-        rows.reverse()
-        rows.append(
-            {
-                "view_name": "workflow_events",
-                "relation_kind": "v",
-                "ordinal": 99,
-                "column_name": "diagnostic_code",
-                "data_type": "text",
-            }
-        )
-        self.assertTrue(public_check.stable_view_schemas_match(rows))
-        required = next(row for row in rows if row["column_name"] == "event_id")
-        required["data_type"] = "text"
-        self.assertFalse(public_check.stable_view_schemas_match(rows))
-        required["data_type"] = "uuid"
-        rows = [row for row in rows if row["column_name"] != "event_id"]
-        self.assertFalse(public_check.stable_view_schemas_match(rows))
-
-    def test_action_dispatch_requires_trusted_principal_and_result(self) -> None:
-        row = {
-            "request_id": "execution-1",
-            "module": "probe",
-            "action": "execute",
-            "version": 1,
-            "principal": "workflow-worker",
-            "status": "OK",
-            "outcome": "ROUTED",
-        }
-        self.assertTrue(
-            public_check.action_dispatch_matches(
-                row,
-                execution_id="execution-1",
-                module="probe",
-                action="execute",
-                outcome="ROUTED",
-            )
-        )
-        row["principal"] = "postgres"
-        self.assertFalse(
-            public_check.action_dispatch_matches(
-                row,
-                execution_id="execution-1",
-                module="probe",
-                action="execute",
-                outcome="ROUTED",
-            )
-        )
 
 
 if __name__ == "__main__":

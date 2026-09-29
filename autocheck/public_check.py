@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the published week-2 black-box contract checks."""
+"""Run the published week-3 Python perimeter black-box checks."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ import json
 import os
 import re
 import secrets
-import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -26,12 +26,16 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 
-MANIFEST_VERSION = "week-2-public-report/v1"
-TOOL_VERSION = "week-2-public-check/1.1"
+MANIFEST_VERSION = "week-3-public-report/v1"
+TOOL_VERSION = "week-3-public-check/0.3"
 PUBLISHED_FIXTURE_DIGEST = (
-    "fdae621f8c88b02e4ee50ba3cec2658470a177da68e5b438349a380d100071d4"
+    "1f83c074ea60ae3941f75dd48e1526030ebdd5e467a66753e1c6a1c06c67c059"
 )
-PUBLISHED_FIXTURE_GENERATOR = "week-2.1"
+PUBLISHED_FIXTURE_GENERATOR = "week-3.1"
+PROVIDER_IMAGE = (
+    "ghcr.io/fintech-dev-lab/internship-provider-simulator:v0.2.0@"
+    "sha256:70e5e0dd9ab8425be84de431ec74516f9bedf5d5529077358e2e2b2037fe0c74"
+)
 COMPOSE_NAMES = (
     "compose.yaml",
     "compose.yml",
@@ -45,8 +49,24 @@ REQUIRED_SERVICES = {
     "postgres",
     "worker-a",
     "worker-b",
+    "outbox-dispatcher",
+    "receipt-adapter",
+    "inbox-reconciler",
+    "provider-simulator",
 }
-AUTOCHECK_VIEWS = {
+RUNNING_SERVICES = REQUIRED_SERVICES - {"cli"}
+PYTHON_SERVICES = (
+    "outbox-dispatcher",
+    "receipt-adapter",
+    "inbox-reconciler",
+)
+CSHARP_SERVICES = ("gateway", "api", "worker-a", "worker-b")
+REQUIRED_VIEWS = {
+    "contract_info",
+    "action_definitions",
+    "action_dispatches",
+    "operations",
+    "operation_events",
     "flow_versions",
     "processes",
     "steps",
@@ -54,259 +74,230 @@ AUTOCHECK_VIEWS = {
     "attempts",
     "signals",
     "workflow_events",
-    "action_dispatches",
-    "action_definitions",
+    "external_requests",
+    "receipts",
+    "outbox",
+    "inbox",
+    "decisions",
 }
-AUTOCHECK_VIEW_SCHEMAS = {
-    "action_definitions": (
-        ("module", "text"),
-        ("action", "text"),
-        ("version", "integer"),
-        ("http_method", "text"),
-        ("target_schema", "text"),
-        ("target_function", "text"),
-        ("outcomes", "jsonb"),
-        ("enabled", "boolean"),
-        ("is_default", "boolean"),
-    ),
-    "action_dispatches": (
-        ("correlation_id", "uuid"),
-        ("request_id", "text"),
-        ("module", "text"),
-        ("action", "text"),
-        ("version", "integer"),
-        ("principal", "text"),
-        ("payload_hash", "text"),
-        ("status", "text"),
-        ("outcome", "text"),
-        ("occurred_at", "timestamp with time zone"),
-    ),
-    "flow_versions": (
-        ("flow_name", "text"),
-        ("flow_version", "integer"),
-        ("status", "text"),
-        ("is_active", "boolean"),
-        ("published_at", "timestamp with time zone"),
-    ),
-    "processes": (
-        ("process_id", "uuid"),
-        ("business_key", "text"),
-        ("flow_name", "text"),
-        ("flow_version", "integer"),
-        ("state", "text"),
-        ("current_step_key", "text"),
-        ("created_at", "timestamp with time zone"),
-        ("updated_at", "timestamp with time zone"),
-    ),
-    "steps": (
-        ("step_instance_id", "uuid"),
-        ("process_id", "uuid"),
-        ("step_key", "text"),
-        ("step_type", "text"),
-        ("state", "text"),
-        ("outcome", "text"),
-        ("entered_at", "timestamp with time zone"),
-        ("completed_at", "timestamp with time zone"),
-    ),
-    "jobs": (
-        ("job_id", "uuid"),
-        ("process_id", "uuid"),
-        ("step_instance_id", "uuid"),
-        ("execution_id", "uuid"),
-        ("state", "text"),
-        ("lease_owner", "text"),
-        ("lease_version", "bigint"),
-        ("lease_until", "timestamp with time zone"),
-        ("attempt_count", "integer"),
-        ("next_attempt_at", "timestamp with time zone"),
-    ),
-    "attempts": (
-        ("attempt_id", "uuid"),
-        ("job_id", "uuid"),
-        ("execution_id", "uuid"),
-        ("lease_version", "bigint"),
-        ("attempt_number", "integer"),
-        ("status", "text"),
-        ("outcome", "text"),
-        ("error_code", "text"),
-        ("started_at", "timestamp with time zone"),
-        ("finished_at", "timestamp with time zone"),
-    ),
-    "signals": (
-        ("message_id", "text"),
-        ("process_id", "uuid"),
-        ("signal_type", "text"),
-        ("body_hash", "text"),
-        ("status", "text"),
-        ("received_at", "timestamp with time zone"),
-    ),
-    "workflow_events": (
-        ("event_id", "uuid"),
-        ("process_id", "uuid"),
-        ("step_instance_id", "uuid"),
-        ("event_type", "text"),
-        ("occurred_at", "timestamp with time zone"),
-    ),
-}
-FIXTURE_FIELDS = {
-    "action",
-    "actionVersion",
-    "businessKeys",
-    "businessValues",
-    "contractVersion",
-    "digest",
-    "effectTable",
-    "errorCodes",
-    "files",
-    "flowName",
-    "generationPhase",
-    "generatorVersion",
-    "modes",
-    "module",
-    "orderingOwner",
-    "outcomes",
-    "processProperties",
-    "properties",
-    "seedMode",
-    "signalMessageId",
-    "signalType",
-    "steps",
-    "targetFunction",
-    "targetSchema",
-}
-FIXTURE_OBJECT_FIELDS = {
-    "businessKeys": {"signal", "manual", "retry", "error", "unknown", "invalid", "v2"},
-    "businessValues": {
-        "signal",
-        "manual",
-        "retry",
-        "error",
-        "unknown",
-        "invalid",
-        "changed",
-        "marker",
-        "signalPayload",
-        "result",
+REQUIRED_VIEW_COLUMNS = {
+    "contract_info": {"contract_version", "generated_at"},
+    "action_definitions": {
+        "module",
+        "action",
+        "version",
+        "http_method",
+        "target_schema",
+        "target_function",
+        "outcomes",
+        "enabled",
+        "is_default",
     },
-    "errorCodes": {"retry", "error"},
-    "modes": {"signal", "manual", "retry", "error", "unknown", "invalid"},
-    "outcomes": {
-        "signal",
-        "manual",
-        "received",
-        "approved",
-        "completed",
-        "unknown",
-        "abandoned",
+    "action_dispatches": {
+        "correlation_id",
+        "request_id",
+        "module",
+        "action",
+        "version",
+        "principal",
+        "payload_hash",
+        "status",
+        "outcome",
+        "occurred_at",
     },
-    "processProperties": {"mode", "value"},
-    "properties": {
-        "mode",
-        "value",
-        "marker",
-        "stored",
-        "revision",
-        "echo",
-        "execution",
+    "operations": {
+        "operation_id",
+        "request_id",
+        "operation_kind",
+        "amount",
+        "currency",
+        "status",
+        "process_id",
+        "created_at",
+        "updated_at",
     },
-    "steps": {"automatic", "wait", "manual", "end"},
+    "operation_events": {
+        "event_id",
+        "operation_id",
+        "event_type",
+        "payload_hash",
+        "occurred_at",
+    },
+    "flow_versions": {
+        "flow_name",
+        "flow_version",
+        "status",
+        "is_active",
+        "published_at",
+    },
+    "processes": {
+        "process_id",
+        "business_key",
+        "flow_name",
+        "flow_version",
+        "state",
+        "current_step_key",
+        "created_at",
+        "updated_at",
+    },
+    "steps": {
+        "step_instance_id",
+        "process_id",
+        "step_key",
+        "step_type",
+        "state",
+        "outcome",
+        "entered_at",
+        "completed_at",
+    },
+    "jobs": {
+        "job_id",
+        "process_id",
+        "step_instance_id",
+        "execution_id",
+        "state",
+        "lease_owner",
+        "lease_version",
+        "lease_until",
+        "attempt_count",
+        "next_attempt_at",
+    },
+    "attempts": {
+        "attempt_id",
+        "job_id",
+        "execution_id",
+        "lease_version",
+        "attempt_number",
+        "status",
+        "outcome",
+        "error_code",
+        "started_at",
+        "finished_at",
+    },
+    "signals": {
+        "message_id",
+        "process_id",
+        "signal_type",
+        "body_hash",
+        "status",
+        "received_at",
+    },
+    "workflow_events": {
+        "event_id",
+        "process_id",
+        "step_instance_id",
+        "event_type",
+        "occurred_at",
+    },
+    "external_requests": {
+        "external_request_id",
+        "operation_id",
+        "state",
+        "payload_hash",
+        "created_at",
+    },
+    "receipts": {
+        "message_id",
+        "external_request_id",
+        "message_version",
+        "outcome",
+        "signature_valid",
+        "body_hash",
+        "received_at",
+        "applied_at",
+    },
+    "outbox": {
+        "outbox_id",
+        "external_request_id",
+        "state",
+        "attempt_count",
+        "next_attempt_at",
+        "last_error_code",
+        "created_at",
+        "delivered_at",
+    },
+    "inbox": {"message_id", "body_hash", "state", "received_at", "applied_at"},
+    "decisions": {
+        "decision_id",
+        "process_id",
+        "step_instance_id",
+        "source",
+        "principal",
+        "reason_hash",
+        "outcome",
+        "rule_version",
+        "created_at",
+    },
 }
-FIXTURE_FILE_FIELDS = {
-    "migration",
-    "actionManifest",
-    "disabledActionManifest",
-    "flowV1Json",
-    "flowV2Json",
-    "flowV1Yaml",
-    "flowV2Yaml",
-    "invalidMaps",
-    "processData",
-    "signalData",
-    "resultData",
+UUID_COLUMNS = {
+    "attempt_id",
+    "correlation_id",
+    "decision_id",
+    "event_id",
+    "execution_id",
+    "job_id",
+    "operation_id",
+    "outbox_id",
+    "process_id",
+    "step_instance_id",
 }
-PROCESS_DATA_FIELDS = {
-    "signal",
-    "manual",
-    "retry",
-    "error",
-    "unknown",
-    "invalid",
-    "changed",
+TIMESTAMPTZ_COLUMNS = {
+    "applied_at",
+    "completed_at",
+    "created_at",
+    "delivered_at",
+    "entered_at",
+    "finished_at",
+    "generated_at",
+    "lease_until",
+    "next_attempt_at",
+    "occurred_at",
+    "published_at",
+    "received_at",
+    "started_at",
+    "updated_at",
 }
-SOLUTION_HEADINGS = {
-    "архитектура",
-    "запуск",
-    "workflow-карты",
-    "worker",
-    "проверка",
-    "диагностика",
-    "ограничения",
+INTEGER_COLUMNS = {
+    "attempt_count",
+    "attempt_number",
+    "flow_version",
+    "message_version",
+    "version",
 }
-README_LITERALS = (
-    "docker compose up -d --build",
-    "./check.sh",
-)
-PHASE_CHECKS = {
-    "publication": (
-        "migration-and-action-publication",
-        "map-validation-and-publication",
-        "publication-image-immutability",
-    ),
-    "execution": (
-        "automatic-signal-end",
-        "signal-idempotency-and-history",
-        "manual-wait",
-        "stable-views",
-    ),
-    "versioning": ("version-pinning-and-start-idempotency",),
-    "concurrency": ("two-worker-reclaim-and-stale-finish",),
-    "recovery": ("action-finish-rollback-and-recovery",),
-    "resilience": (
-        "bounded-retry-and-terminal-failures",
-        "worker-recreate-persistence",
-    ),
-    "integrity": ("runtime-image-immutability",),
+BIGINT_COLUMNS = {"lease_version"}
+BOOLEAN_COLUMNS = {"enabled", "is_active", "is_default", "signature_valid"}
+JSONB_COLUMNS = {"outcomes"}
+NUMERIC_COLUMNS = {"amount"}
+FIXTURE_FILES = {
+    "providerRequest",
+    "adapterRequest",
+    "reviewAutoRequest",
+    "reviewManualRequest",
 }
 _SECRET_KEY = re.compile(
-    r"(?:authorization|password|secret|signing(?:[_-]?key)?|token|payload|processdata|body)$",
+    r"(?:authorization|password|secret|token|signature|capability|payload|body)$",
     re.IGNORECASE,
 )
-_TRANSPORT_ERROR = re.compile(
-    r"(?:cannot connect to the docker daemon|is the docker daemon running|"
-    r"error during connect|context deadline exceeded|connection refused|"
-    r"no route to host|server closed the connection|could not connect|"
-    r"permission denied.*(?:docker|daemon|sock)|(?:docker|daemon|sock).*permission denied|"
-    r"unknown (?:flag|shorthand flag).*no-env-resolution|"
-    r"compose.*is not a docker command|unknown docker command.*compose|"
-    r"unsupported.*(?:!reset|!override)|unknown tag.*(?:!reset|!override))",
-    re.IGNORECASE,
-)
-_WRITE_WORD = re.compile(
-    r"\b(?:insert|update|delete|merge|alter|drop|create|grant|revoke|truncate|"
-    r"copy|call|do|vacuum|refresh|reindex|cluster)\b",
-    re.IGNORECASE,
-)
-_SQL_STRING_LITERAL = re.compile(r"'(?:''|[^'])*'")
 
 
 class FixtureError(ValueError):
-    """Trusted fixture metadata or contents are invalid."""
+    """Trusted fixture metadata or content is invalid."""
 
 
 class ContractError(RuntimeError):
-    """The candidate surface did not satisfy a published contract."""
+    """Candidate behavior violates the published contract."""
 
 
 class EnvironmentFailure(RuntimeError):
-    """The checker could not use its local Docker or process transport."""
+    """The local trusted checking environment cannot execute the scenario."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class CommandResult:
     command: tuple[str, ...]
     returncode: int
-    stdout: str = ""
-    stderr: str = ""
+    stdout: str
+    stderr: str
     timed_out: bool = False
 
     @property
@@ -314,482 +305,231 @@ class CommandResult:
         return self.returncode == 0 and not self.timed_out
 
 
-@dataclass
+@dataclass(frozen=True)
 class HttpResult:
     status: int
-    body: dict[str, Any] | None
-    error: str | None = None
+    body: bytes
+    headers: dict[str, str]
+
+    def json(self) -> dict[str, Any] | None:
+        try:
+            value = json.loads(self.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.UTC).isoformat()
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def _base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def issue_token(secret: str, subject: str, scopes: Sequence[str]) -> str:
+def issue_token(
+    secret: str,
+    subject: str,
+    consumer: str,
+    scopes: Sequence[str],
+    *,
+    issuer: str = "moduledev-course",
+    audience: str = "moduledev-api",
+) -> str:
     now = int(time.time())
-    header = _base64url(
-        json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
-    )
+    header = _base64url(b'{"alg":"HS256","typ":"JWT"}')
     payload = _base64url(
         json.dumps(
             {
-                "iss": "moduledev-course",
-                "aud": "moduledev-api",
+                "iss": issuer,
+                "aud": audience,
                 "sub": subject,
-                "consumer": "public-check",
+                "consumer": consumer,
                 "scope": " ".join(scopes),
-                "iat": now,
-                "exp": now + 900,
+                "iat": now - 5,
+                "exp": now + 3600,
             },
             separators=(",", ":"),
-        ).encode()
+            sort_keys=True,
+        ).encode("utf-8")
     )
-    signature = hmac.new(
-        secret.encode(), f"{header}.{payload}".encode("ascii"), hashlib.sha256
-    ).digest()
-    return f"{header}.{payload}.{_base64url(signature)}"
+    signing_input = f"{header}.{payload}".encode("ascii")
+    signature = _base64url(
+        hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    )
+    return f"{header}.{payload}.{signature}"
 
 
-def _inside(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
+def normalized_receipt(legacy: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "providerPaymentId",
+        "operationId",
+        "result",
+        "message",
+        "occurredAt",
+    }
+    if set(legacy) != expected:
+        raise ValueError("legacy callback fields do not match provider v0.2.0")
+    for field in ("providerPaymentId", "operationId", "occurredAt"):
+        value = legacy[field]
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 128
+            or "\r" in value
+            or "\n" in value
+        ):
+            raise ValueError(f"invalid legacy {field}")
+    if legacy["result"] not in {"COMPLETED", "REJECTED"}:
+        raise ValueError("invalid legacy result")
+    message = legacy["message"]
+    if (
+        not isinstance(message, str)
+        or len(message) > 500
+        or "\r" in message
+        or "\n" in message
+    ):
+        raise ValueError("invalid legacy message")
+    return {
+        "externalRequestId": legacy["operationId"],
+        "messageId": legacy["providerPaymentId"],
+        "occurredAt": legacy["occurredAt"],
+        "outcome": legacy["result"],
+        "providerPaymentId": legacy["providerPaymentId"],
+        "version": 1,
+    }
+
+
+def receipt_bytes(receipt: dict[str, Any]) -> bytes:
+    return json.dumps(
+        receipt,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def receipt_signature(secret: str, body: bytes) -> str:
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"v1={digest}"
+
+
+def same_action_result(first: Any, second: Any) -> bool:
+    fields = ("status", "outcome", "result")
+    return (
+        isinstance(first, dict)
+        and isinstance(second, dict)
+        and all(field in first and field in second for field in fields)
+        and all(first[field] == second[field] for field in fields)
+    )
 
 
 def canonical_fixture_digest(root: Path) -> str:
-    """Hash every fixture file and canonicalize fixture.json without its digest."""
-
-    root = root.resolve()
-    digest = hashlib.sha256()
-    files = sorted(
-        (path for path in root.rglob("*") if path.is_file()),
-        key=lambda path: path.relative_to(root).as_posix(),
+    metadata_path = root / "fixture.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise FixtureError("fixture.json is unreadable") from error
+    if not isinstance(metadata, dict):
+        raise FixtureError("fixture.json must be an object")
+    canonical_metadata = dict(metadata)
+    canonical_metadata["digest"] = ""
+    hasher = hashlib.sha256()
+    hasher.update(b"fixture.json\0")
+    hasher.update(
+        json.dumps(
+            canonical_metadata,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
     )
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        if relative == "fixture.json":
-            try:
-                metadata = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise FixtureError(f"Invalid fixture.json: {error}") from error
-            if not isinstance(metadata, dict):
-                raise FixtureError("fixture.json must contain an object")
-            metadata.pop("digest", None)
-            contents = (
-                json.dumps(
-                    metadata,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            ).encode("utf-8")
-        else:
-            contents = path.read_bytes()
-        digest.update(contents)
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _fixture_paths(files: dict[str, Any]) -> set[str]:
-    paths = {
-        str(files[name])
-        for name in FIXTURE_FILE_FIELDS
-        if name not in {"invalidMaps", "processData"}
-    }
-    paths.update(str(path) for path in files["invalidMaps"]["schema"])
-    paths.update(str(path) for path in files["invalidMaps"]["semantic"])
-    paths.update(str(path) for path in files["processData"].values())
-    return paths
+    files = metadata.get("files")
+    if not isinstance(files, dict) or set(files) != FIXTURE_FILES:
+        raise FixtureError("fixture file map is invalid")
+    for relative in sorted(files.values()):
+        if not isinstance(relative, str):
+            raise FixtureError("fixture file path is invalid")
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError as error:
+            raise FixtureError("fixture path escapes its root") from error
+        if not path.is_file():
+            raise FixtureError(f"fixture file is missing: {relative}")
+        hasher.update(b"\0")
+        hasher.update(relative.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()
 
 
 def load_fixture(root: Path) -> dict[str, Any]:
-    root = root.expanduser().resolve()
-    path = root / "fixture.json"
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        fixture = json.loads((root / "fixture.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise FixtureError(f"Cannot read fixture.json: {error}") from error
-    if not isinstance(value, dict) or set(value) != FIXTURE_FIELDS:
-        actual = sorted(value) if isinstance(value, dict) else type(value).__name__
-        raise FixtureError(
-            f"fixture.json fields differ from the published fixture: {actual}"
+        raise FixtureError("fixture metadata is unreadable") from error
+    if not isinstance(fixture, dict):
+        raise FixtureError("fixture metadata must be an object")
+    if fixture.get("generatorVersion") != PUBLISHED_FIXTURE_GENERATOR:
+        raise FixtureError("fixture generator version is not published")
+    if fixture.get("contractVersion") != "course-1":
+        raise FixtureError("fixture contract version is invalid")
+    actual = canonical_fixture_digest(root)
+    if fixture.get("digest") != actual or actual != PUBLISHED_FIXTURE_DIGEST:
+        raise FixtureError("fixture digest does not match the published package")
+    if fixture.get("provider", {}).get("image") != PROVIDER_IMAGE:
+        raise FixtureError("provider image is not the published digest")
+    if set(fixture.get("services", [])) != REQUIRED_SERVICES:
+        raise FixtureError("fixture service seam is invalid")
+    for relative in fixture["files"].values():
+        value = json.loads((root / relative).read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise FixtureError(f"fixture payload is not an object: {relative}")
+    return fixture
+
+
+def _redact(value: Any, sensitive: Sequence[str], depth: int = 0) -> Any:
+    if depth > 12:
+        return "[depth-limit]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if _SECRET_KEY.search(str(key)):
+                result[str(key)] = "[redacted]"
+            else:
+                result[str(key)] = _redact(item, sensitive, depth + 1)
+        return result
+    if isinstance(value, list):
+        return [_redact(item, sensitive, depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return [_redact(item, sensitive, depth + 1) for item in value]
+    if isinstance(value, set):
+        return sorted(
+            (_redact(item, sensitive, depth + 1) for item in value),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
         )
-    if value.get("contractVersion") != "course-1":
-        raise FixtureError("Fixture contractVersion must be course-1")
-    if value.get("generatorVersion") != PUBLISHED_FIXTURE_GENERATOR:
-        raise FixtureError("Fixture generatorVersion is not the published version")
-    if (
-        value.get("generationPhase") != "post-build"
-        or value.get("orderingOwner") != "runner"
-    ):
-        raise FixtureError("Fixture generation/order metadata is invalid")
-    if value.get("seedMode") != "explicit-test-seed" or value.get("actionVersion") != 1:
-        raise FixtureError("Fixture seed/action metadata is invalid")
-    for field, expected in FIXTURE_OBJECT_FIELDS.items():
-        child = value.get(field)
-        if not isinstance(child, dict) or set(child) != expected:
-            raise FixtureError(f"Fixture object {field} has invalid fields")
-        if any(not isinstance(item, str) or not item for item in child.values()):
-            raise FixtureError(f"Fixture object {field} must contain non-empty strings")
-    files = value.get("files")
-    if not isinstance(files, dict) or set(files) != FIXTURE_FILE_FIELDS:
-        raise FixtureError("Fixture files object has invalid fields")
-    invalid = files.get("invalidMaps")
-    if not isinstance(invalid, dict) or set(invalid) != {"schema", "semantic"}:
-        raise FixtureError("Fixture invalidMaps object is invalid")
-    for category in ("schema", "semantic"):
-        paths = invalid.get(category)
-        if not isinstance(paths, list) or not paths or len(paths) != len(set(paths)):
-            raise FixtureError(
-                f"Fixture invalidMaps.{category} must be a non-empty unique list"
-            )
-        if not all(isinstance(item, str) and item for item in paths):
-            raise FixtureError(
-                f"Fixture invalidMaps.{category} contains an invalid path"
-            )
-    process_data = files.get("processData")
-    if not isinstance(process_data, dict) or set(process_data) != PROCESS_DATA_FIELDS:
-        raise FixtureError("Fixture processData object has invalid fields")
-    referenced = _fixture_paths(files)
-    actual_files = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.name != "fixture.json"
-    }
-    if referenced != actual_files:
-        raise FixtureError(
-            "Fixture metadata does not reference exactly the fixture file set"
-        )
-    for relative in referenced:
-        candidate = root / relative
-        if Path(relative).is_absolute() or ".." in Path(relative).parts:
-            raise FixtureError(f"Unsafe fixture path: {relative}")
-        if not candidate.is_file() or not _inside(candidate, root):
-            raise FixtureError(f"Missing fixture path: {relative}")
-    digest = value.get("digest")
-    if not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None:
-        raise FixtureError("Fixture digest has invalid syntax")
-    actual_digest = canonical_fixture_digest(root)
-    if digest != PUBLISHED_FIXTURE_DIGEST or actual_digest != PUBLISHED_FIXTURE_DIGEST:
-        raise FixtureError("Fixture digest differs from the published checker fixture")
-    for field in ("module", "action", "targetSchema", "targetFunction", "effectTable"):
-        if re.fullmatch(r"[a-z][a-z0-9_]{0,62}", str(value.get(field, ""))) is None:
-            raise FixtureError(f"Fixture identifier {field} is invalid")
+    if isinstance(value, str):
+        result = value
+        for secret in sensitive:
+            if secret:
+                result = result.replace(secret, "[redacted]")
+        return result[:2000]
     return value
 
 
-def extract_cli_json(stdout: str) -> dict[str, Any] | None:
-    """Return one exact JSON object from CLI stdout."""
-
-    text = stdout.strip()
-    if not text:
-        return None
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def parse_failpoint_acks(log_text: str, expected_name: str) -> list[dict[str, str]]:
-    decoder = json.JSONDecoder()
-    result: list[dict[str, str]] = []
-    for line in log_text.splitlines():
-        start = line.find("{")
-        if start < 0:
-            continue
-        try:
-            value, _ = decoder.raw_decode(line[start:])
-        except json.JSONDecodeError:
-            continue
-        if (
-            isinstance(value, dict)
-            and value.get("event") == "failpoint.reached"
-            and value.get("name") == expected_name
-            and isinstance(value.get("instanceId"), str)
-            and value["instanceId"]
-        ):
-            result.append(
-                {
-                    "event": "failpoint.reached",
-                    "name": expected_name,
-                    "instanceId": value["instanceId"],
-                }
-            )
-    return result
-
-
-def validate_read_only_query(
-    query: str, allowed_fixture_relation: tuple[str, str] | None = None
-) -> None:
-    if not query.strip() or ";" in query or "--" in query or "/*" in query:
-        raise ValueError("Query must be one comment-free statement")
-    if re.match(r"^\s*(?:select|with)\b", query, re.IGNORECASE) is None:
-        raise ValueError("Query must start with SELECT or WITH")
-    scrubbed = _SQL_STRING_LITERAL.sub("", query)
-    if "'" in scrubbed:
-        raise ValueError("Query contains an unterminated string literal")
-    if _WRITE_WORD.search(scrubbed):
-        raise ValueError("Query must be read-only")
-    references = {
-        (schema.casefold(), relation.casefold())
-        for schema, relation in re.findall(
-            r"\b(?:from|join)\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b",
-            query,
-            re.IGNORECASE,
-        )
-    }
-    allowed = {("autocheck", view) for view in AUTOCHECK_VIEWS}
-    if allowed_fixture_relation is not None:
-        allowed.add(tuple(value.casefold() for value in allowed_fixture_relation))
-    relation_references = {item for item in references if item[0] not in {"pg_catalog"}}
-    if not references or not relation_references.issubset(allowed):
-        raise ValueError("Query references a non-contract relation")
-
-
-def exact_active_version(rows: Sequence[dict[str, Any]], expected: int) -> bool:
-    versions = {row.get("flow_version"): row for row in rows}
-    active = {row.get("flow_version") for row in rows if row.get("is_active") is True}
-    return (
-        len(versions) == len(rows)
-        and {1, expected}.issubset(versions)
-        and active == {expected}
-        and versions[expected].get("status") == "PUBLISHED"
+def report_has_forbidden_keys(value: Any) -> bool:
+    forbidden = re.compile(
+        r"(?:score|earned|points|criterion|hmac|secret|token|signature|capability|payload|body)",
+        re.IGNORECASE,
     )
-
-
-def process_state_matches(
-    row: dict[str, Any], state: str, current_step: str | None = None
-) -> bool:
-    return row.get("state") == state and (
-        current_step is None or row.get("current_step_key") == current_step
-    )
-
-
-def strictly_increasing_integer(current: Any, previous: Any) -> bool:
-    return (
-        isinstance(current, int)
-        and not isinstance(current, bool)
-        and isinstance(previous, int)
-        and not isinstance(previous, bool)
-        and current > previous
-    )
-
-
-def stable_view_schemas_match(rows: Sequence[dict[str, Any]]) -> bool:
-    actual: dict[str, dict[str, str]] = {}
-    for row in rows:
-        view = row.get("view_name")
-        column = row.get("column_name")
-        data_type = row.get("data_type")
-        if (
-            view not in AUTOCHECK_VIEW_SCHEMAS
-            or row.get("relation_kind") != "v"
-            or not isinstance(column, str)
-            or not isinstance(data_type, str)
-        ):
-            return False
-        columns = actual.setdefault(str(view), {})
-        if column in columns:
-            return False
-        columns[column] = data_type
-    return all(
-        view in actual
-        and all(actual[view].get(column) == data_type for column, data_type in columns)
-        for view, columns in AUTOCHECK_VIEW_SCHEMAS.items()
-    )
-
-
-def action_dispatch_matches(
-    row: dict[str, Any], *, execution_id: str, module: str, action: str, outcome: str
-) -> bool:
-    return (
-        row.get("request_id") == execution_id
-        and row.get("module") == module
-        and row.get("action") == action
-        and row.get("version") == 1
-        and row.get("principal") == "workflow-worker"
-        and row.get("status") == "OK"
-        and row.get("outcome") == outcome
-    )
-
-
-def job_attempts_consistent(
-    job: dict[str, Any], attempts: Sequence[dict[str, Any]], expected_outcome: str
-) -> bool:
-    count = job.get("attempt_count")
-    if (
-        not isinstance(count, int)
-        or isinstance(count, bool)
-        or count < 1
-        or len(attempts) != count
-    ):
-        return False
-    numbers = [row.get("attempt_number") for row in attempts]
-    leases = [row.get("lease_version") for row in attempts]
-    if numbers != list(range(1, count + 1)):
-        return False
-    if not all(isinstance(item, int) and not isinstance(item, bool) for item in leases):
-        return False
-    if leases != sorted(set(leases)) or leases[-1] != job.get("lease_version"):
-        return False
-    if len({row.get("attempt_id") for row in attempts}) != count:
-        return False
-    if any(
-        row.get("job_id") != job.get("job_id")
-        or row.get("execution_id") != job.get("execution_id")
-        or not row.get("started_at")
-        or not row.get("finished_at")
-        for row in attempts
-    ):
-        return False
-    for row in attempts:
-        try:
-            started = dt.datetime.fromisoformat(
-                str(row["started_at"]).replace("Z", "+00:00")
-            )
-            finished = dt.datetime.fromisoformat(
-                str(row["finished_at"]).replace("Z", "+00:00")
-            )
-        except (KeyError, ValueError):
-            return False
-        try:
-            invalid_order = started > finished
-        except TypeError:
-            return False
-        if invalid_order:
-            return False
-        if row.get("status") == "FAILED":
-            if row.get("outcome") is not None or not isinstance(
-                row.get("error_code"), str
-            ):
-                return False
-        elif row.get("status") == "SUCCEEDED":
-            if (
-                row.get("outcome") != expected_outcome
-                or row.get("error_code") is not None
-            ):
-                return False
-        else:
-            return False
-    return (
-        job.get("state") == "SUCCEEDED"
-        and sum(row.get("status") == "SUCCEEDED" for row in attempts) == 1
-        and attempts[-1].get("status") == "SUCCEEDED"
-        and attempts[-1].get("outcome") == expected_outcome
-        and attempts[-1].get("error_code") is None
-    )
-
-
-def terminal_failure_consistent(
-    process: dict[str, Any],
-    jobs: Sequence[dict[str, Any]],
-    attempts: Sequence[dict[str, Any]],
-    effects: Sequence[dict[str, Any]],
-    *,
-    expected_attempts: int,
-    expected_error: str | None = None,
-) -> bool:
-    if (
-        process.get("state") != "FAILED"
-        or len(jobs) != 1
-        or jobs[0].get("state") != "DEAD"
-        or jobs[0].get("attempt_count") != expected_attempts
-        or len(attempts) != expected_attempts
-        or effects
-    ):
-        return False
-    job = jobs[0]
-    leases = [row.get("lease_version") for row in attempts]
-    if not all(
-        isinstance(value, int) and not isinstance(value, bool) for value in leases
-    ):
-        return False
-    if leases != sorted(set(leases)) or leases[-1] != job.get("lease_version"):
-        return False
-    for row in attempts:
-        try:
-            started = dt.datetime.fromisoformat(
-                str(row["started_at"]).replace("Z", "+00:00")
-            )
-            finished = dt.datetime.fromisoformat(
-                str(row["finished_at"]).replace("Z", "+00:00")
-            )
-        except (KeyError, ValueError):
-            return False
-        try:
-            invalid_order = started > finished
-        except TypeError:
-            return False
-        if invalid_order:
-            return False
-    return (
-        [row.get("attempt_number") for row in attempts]
-        == list(range(1, expected_attempts + 1))
-        and len({row.get("attempt_id") for row in attempts}) == expected_attempts
-        and all(
-            row.get("status") == "FAILED"
-            and row.get("job_id") == job.get("job_id")
-            and row.get("execution_id") == job.get("execution_id")
-            and row.get("outcome") is None
-            and isinstance(row.get("error_code"), str)
-            and bool(row.get("error_code"))
-            and (expected_error is None or row.get("error_code") == expected_error)
-            for row in attempts
-        )
-    )
-
-
-def _redact(value: Any, sensitive: Sequence[str] = (), depth: int = 0) -> Any:
-    if depth > 7:
-        return "<depth-limited>"
     if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for raw_key, child in list(value.items())[:200]:
-            key = str(raw_key)[:100]
-            result[key] = (
-                "<redacted>"
-                if _SECRET_KEY.search(key)
-                else _redact(child, sensitive, depth + 1)
-            )
-        return result
-    if isinstance(value, (list, tuple, set)):
-        return [_redact(child, sensitive, depth + 1) for child in list(value)[:200]]
-    if isinstance(value, str):
-        rendered = value
-        for item in sensitive:
-            if item:
-                rendered = rendered.replace(item, "<redacted>")
-        return rendered if len(rendered) <= 1000 else rendered[:997] + "..."
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return str(value)[:1000]
-
-
-def report_has_forbidden_keys(report: Any) -> bool:
-    blocked = {
-        ("sc" + "ore").casefold(),
-        ("poi" + "nts").casefold(),
-        ("criter" + "ionId").casefold(),
-        ("evid" + "enceId").casefold(),
-        ("diagnostic" + "Code").casefold(),
-    }
-    if isinstance(report, dict):
         return any(
-            str(key).casefold() in blocked or report_has_forbidden_keys(value)
-            for key, value in report.items()
+            forbidden.search(str(key)) or report_has_forbidden_keys(item)
+            for key, item in value.items()
         )
-    if isinstance(report, list):
-        return any(report_has_forbidden_keys(value) for value in report)
+    if isinstance(value, list):
+        return any(report_has_forbidden_keys(item) for item in value)
     return False
 
 
@@ -798,362 +538,411 @@ def build_report(
     started_at: str,
     finished_at: str,
     status: str,
-    checks: Sequence[dict[str, Any]],
-    commands: Sequence[dict[str, Any]],
+    checks: list[dict[str, Any]],
+    commands: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    failed = [item["name"] for item in checks if item.get("status") != "passed"]
     return {
         "manifestVersion": MANIFEST_VERSION,
         "toolVersion": TOOL_VERSION,
         "timestamps": {"startedAt": started_at, "finishedAt": finished_at},
         "status": status,
-        "checks": list(checks),
-        "failedChecks": failed,
-        "commands": list(commands),
+        "checks": checks,
+        "failedChecks": [
+            item["name"] for item in checks if item.get("status") == "failed"
+        ],
+        "commands": commands,
     }
 
 
-def _sql_literal(value: str) -> str:
-    if re.fullmatch(r"[A-Za-z0-9_.:-]{1,180}", value) is None:
-        raise ContractError("Candidate returned an unsafe identifier")
-    return "'" + value + "'"
-
-
-def _normalize_image_id(value: str) -> str:
-    match = re.fullmatch(r"sha256:([a-f0-9]{64})\s*", value)
-    if match is None:
-        raise ContractError("Compose did not return one full image ID")
-    return "sha256:" + match.group(1)
-
-
 def _published_ports(service: Any) -> set[int]:
-    if not isinstance(service, dict):
-        return set()
     result: set[int] = set()
-    for entry in service.get("ports", []) or []:
+    if not isinstance(service, dict):
+        return result
+    for item in service.get("ports", []) or []:
         value: Any = None
-        if isinstance(entry, dict):
-            value = entry.get("published")
-        elif isinstance(entry, (str, int)):
-            parts = str(entry).rsplit(":", 2)
-            value = parts[-2] if len(parts) >= 2 else None
+        if isinstance(item, dict):
+            value = item.get("published")
+        elif isinstance(item, str):
+            without_protocol = item.split("/", 1)[0]
+            default_port = re.search(r":-(\d+)}(?=:)", without_protocol)
+            if default_port:
+                value = default_port.group(1)
+            else:
+                parts = without_protocol.rsplit(":", 2)
+                if len(parts) >= 2:
+                    value = parts[-2]
+        if isinstance(value, str):
+            default_port = re.fullmatch(r"\$\{[^}]+:-(\d+)}", value)
+            if default_port:
+                value = default_port.group(1)
+        if isinstance(value, str) and re.fullmatch(r"\d+-\d+", value):
+            start, end = (int(part) for part in value.split("-", 1))
+            if start <= end and end - start <= 1000:
+                result.update(range(start, end + 1))
+            continue
         try:
             result.add(int(value))
         except (TypeError, ValueError):
-            result.add(0)
+            continue
     return result
 
 
-def _volume_source(value: Any) -> tuple[str | None, str | None, bool]:
-    if isinstance(value, dict):
-        return value.get("type"), value.get("source"), value.get("read_only") is True
-    if not isinstance(value, str):
-        return None, None, False
-    parts = value.split(":")
-    if len(parts) < 2:
-        return "volume", value, False
-    source = parts[0]
-    kind = "bind" if source.startswith(("/", ".", "~")) else "volume"
-    options = parts[2].split(",") if len(parts) > 2 else []
-    return kind, source, "ro" in options
+def _target_ports(service: Any) -> set[int]:
+    result: set[int] = set()
+    if not isinstance(service, dict):
+        return result
+    for item in service.get("ports", []) or []:
+        value: Any = None
+        if isinstance(item, dict):
+            value = item.get("target")
+        elif isinstance(item, str):
+            value = item.split("/", 1)[0].rsplit(":", 1)[-1]
+        if isinstance(value, str) and re.fullmatch(r"\d+-\d+", value):
+            start, end = (int(part) for part in value.split("-", 1))
+            if start <= end and end - start <= 1000:
+                result.update(range(start, end + 1))
+            continue
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
-def _candidate_path(value: str, base: Path) -> Path:
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else base / path
+def _service_environment(service: Any) -> dict[str, str]:
+    if not isinstance(service, dict):
+        return {}
+    environment = service.get("environment", {}) or {}
+    if isinstance(environment, dict):
+        return {
+            str(key): "" if value is None else str(value)
+            for key, value in environment.items()
+        }
+    if isinstance(environment, list):
+        result: dict[str, str] = {}
+        for item in environment:
+            key, separator, value = str(item).partition("=")
+            result[key] = value if separator else ""
+        return result
+    return {}
 
 
-def _raw_compose_findings(path: Path) -> list[str]:
+def _path_is_within(path: Any, root: Path, *, base: Path | None = None) -> bool:
+    if (
+        not isinstance(path, str)
+        or not path
+        or re.match(r"^(?:[a-z]+://|git@)", path, re.I)
+    ):
+        return False
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = (base or root) / candidate
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as error:
-        return [f"Compose file is unreadable: {error}"]
+        candidate.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _database_environment_entries(environment: dict[str, str]) -> dict[str, str]:
+    key_pattern = re.compile(
+        r"(?:^|_)(?:PG(?:HOST|PORT|DATABASE|USER|PASSWORD|SERVICE)|"
+        r"DB_(?:HOST|PORT|NAME|USER|USERNAME|PASSWORD)|"
+        r"DB_(?:URL|URI|DSN)|"
+        r"DATABASE_(?:HOST|PORT|NAME|USER|USERNAME|PASSWORD|URL|URI|DSN)|"
+        r"POSTGRES(?:QL)?_(?:HOST|PORT|DB|DATABASE|USER|USERNAME|PASSWORD|URL|URI|DSN)|"
+        r"PGDSN|CONNECTION_STRING|DATABASE_CONNECTION_STRING)(?:$|_)",
+        re.I,
+    )
+    result = {
+        key: value for key, value in environment.items() if key_pattern.search(key)
+    }
+    for key, value in environment.items():
+        if re.match(r"^postgres(?:ql)?://", value, re.I):
+            result[key] = value
+        if re.search(
+            r"(?:^|\s)(?:host|hostaddr|port|dbname|user|password|service)=", value, re.I
+        ):
+            result[key] = value
+    return result
+
+
+def _database_principals(environment: dict[str, str]) -> set[str]:
+    principals: set[str] = set()
+    user_key = re.compile(
+        r"(?:^|_)(?:PGUSER|DB_USER|DB_USERNAME|DATABASE_USER|DATABASE_USERNAME|"
+        r"POSTGRES_USER|POSTGRES_USERNAME)(?:$|_)",
+        re.I,
+    )
+    for key, value in _database_environment_entries(environment).items():
+        if user_key.search(key) and value:
+            principals.add(value)
+        if re.match(r"^postgres(?:ql)?://", value, re.I):
+            try:
+                username = urllib.parse.urlsplit(value).username
+            except ValueError:
+                username = None
+            if username:
+                principals.add(urllib.parse.unquote(username))
+    return principals
+
+
+def _expected_column_type(column: str) -> str:
+    if column in UUID_COLUMNS:
+        return "uuid"
+    if column in TIMESTAMPTZ_COLUMNS:
+        return "timestamp with time zone"
+    if column in INTEGER_COLUMNS:
+        return "integer"
+    if column in BIGINT_COLUMNS:
+        return "bigint"
+    if column in BOOLEAN_COLUMNS:
+        return "boolean"
+    if column in JSONB_COLUMNS:
+        return "jsonb"
+    if column in NUMERIC_COLUMNS:
+        return "numeric"
+    return "text"
+
+
+def _secret_distribution_findings(
+    config: dict[str, Any],
+    secrets_by_name: dict[str, tuple[str, set[tuple[str, str]]]],
+) -> list[str]:
     findings: list[str] = []
-    for field in ("include", "extends"):
-        if re.search(rf"(?m)(?:^|[{{,])\s*(?:{field}|[\"']{field}[\"'])\s*:", text):
-            findings.append(f"Compose {field} is not allowed by the checker sandbox")
+    services = config.get("services", {})
+    if not isinstance(services, dict):
+        return ["services must be an object"]
+    top_level = dict(config)
+    top_level.pop("services", None)
+    top_level_text = json.dumps(top_level, ensure_ascii=False)
+    for label, (secret, allowed_locations) in secrets_by_name.items():
+        if not secret:
+            continue
+        if secret in top_level_text:
+            findings.append(f"{label}: secret is exposed outside service environment")
+        for service_name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            environment = _service_environment(service)
+            for key, value in environment.items():
+                if (
+                    secret in value
+                    and (str(service_name), key) not in allowed_locations
+                    and (str(service_name), "*") not in allowed_locations
+                ):
+                    findings.append(
+                        f"{label}: secret is exposed to {service_name}.{key}"
+                    )
+            non_environment = dict(service)
+            non_environment.pop("environment", None)
+            if secret in json.dumps(non_environment, ensure_ascii=False):
+                findings.append(
+                    f"{label}: secret is exposed outside {service_name} environment"
+                )
     return findings
+
+
+def _provider_image_matches(value: Any) -> bool:
+    if not isinstance(value, str) or "@" not in value:
+        return False
+    reference, digest = value.rsplit("@", 1)
+    expected_reference, expected_digest = PROVIDER_IMAGE.rsplit("@", 1)
+    expected_repository = expected_reference.rsplit(":", 1)[0]
+    repository = (
+        reference.rsplit(":", 1)[0]
+        if ":" in reference.rsplit("/", 1)[-1]
+        else reference
+    )
+    return repository == expected_repository and digest == expected_digest
+
+
+def _provider_callback_base(config: dict[str, Any]) -> str:
+    services = config.get("services", {})
+    if not isinstance(services, dict):
+        raise ContractError("services must be an object")
+    provider = services.get("provider-simulator")
+    callback = _service_environment(provider).get("CALLBACK_URL", "")
+    try:
+        parsed = urllib.parse.urlsplit(callback)
+        port = parsed.port
+    except ValueError as error:
+        raise ContractError("provider CALLBACK_URL is invalid") from error
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "receipt-adapter"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or re.fullmatch(r"/callbacks/provider-v02/[^/]*", parsed.path) is None
+    ):
+        raise ContractError(
+            "provider CALLBACK_URL must target the receipt-adapter callback path"
+        )
+    authority = "receipt-adapter" if port in (None, 80) else f"receipt-adapter:{port}"
+    return f"http://{authority}/callbacks/provider-v02"
 
 
 def _unsafe_compose_findings(config: dict[str, Any], repo: Path) -> list[str]:
     findings: list[str] = []
     services = config.get("services")
-    services = services if isinstance(services, dict) else {}
+    if not isinstance(services, dict):
+        return ["services must be an object"]
     for name, service in services.items():
         if not isinstance(service, dict):
+            findings.append(f"{name}: service config is invalid")
             continue
-        if service.get("privileged") is True:
-            findings.append(f"{name}: privileged")
-        for field in ("network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup"):
-            value = str(service.get(field, ""))
-            if (
-                value.casefold() == "host"
-                or value.casefold().startswith("container:")
-                or "${" in value
-            ):
-                findings.append(f"{name}: unsafe {field}")
-        if (
-            service.get("devices")
-            or service.get("device_cgroup_rules")
-            or service.get("gpus")
-            or service.get("cap_add")
-            or service.get("runtime")
+        if service.get("privileged") or service.get("network_mode") == "host":
+            findings.append(f"{name}: host/elevated runtime is forbidden")
+        if service.get("pid") == "host" or service.get("ipc") == "host":
+            findings.append(f"{name}: host namespace is forbidden")
+        if service.get("devices") or service.get("cap_add"):
+            findings.append(f"{name}: device/capability access is forbidden")
+        if any(
+            service.get(key)
+            for key in (
+                "configs",
+                "credential_spec",
+                "develop",
+                "env_file",
+                "label_file",
+                "secrets",
+                "volumes_from",
+            )
         ):
-            findings.append(f"{name}: elevated device/capability access")
-        if service.get("use_api_socket"):
-            findings.append(f"{name}: Docker API socket access")
-        if service.get("volumes_from"):
-            findings.append(f"{name}: volumes_from")
-        if service.get("provider"):
-            findings.append(f"{name}: external service provider")
-        if service.get("external_links"):
-            findings.append(f"{name}: external_links")
-        logging = service.get("logging") or {}
-        if isinstance(logging, dict) and str(
-            logging.get("driver", "")
-        ).casefold() not in {
-            "",
-            "json-file",
-            "local",
-        }:
-            findings.append(f"{name}: external logging driver")
-        if service.get("credential_spec"):
-            findings.append(f"{name}: credential_spec")
-        for option in service.get("security_opt", []) or []:
-            if "unconfined" in str(option).casefold():
-                findings.append(f"{name}: unconfined security option")
+            findings.append(f"{name}: host-backed service resources are forbidden")
         for volume in service.get("volumes", []) or []:
-            kind, source, _read_only = _volume_source(volume)
-            if not source:
-                continue
-            if "${" in str(source):
-                findings.append(f"{name}: interpolated volume source")
-            if "docker.sock" in str(source).casefold():
-                findings.append(f"{name}: Docker socket mount")
-            if kind == "bind":
-                source_path = _candidate_path(str(source), repo)
-                if not _inside(source_path, repo):
-                    findings.append(f"{name}: external bind mount")
-                else:
-                    findings.append(f"{name}: repository bind mount")
-
+            if isinstance(volume, dict):
+                source = str(volume.get("source", ""))
+                volume_type = volume.get("type")
+            else:
+                source = str(volume).split(":", 1)[0]
+                volume_type = "bind" if source.startswith((".", "/")) else "volume"
+            if volume_type == "bind":
+                findings.append(f"{name}: bind mount is forbidden")
+            if "docker.sock" in source.lower():
+                findings.append(f"{name}: Docker socket is forbidden")
         build = service.get("build")
-        if build:
-            context = build.get("context", ".") if isinstance(build, dict) else build
-            context_text = str(context)
-            context_path = _candidate_path(context_text, repo)
+        context = build.get("context", ".") if isinstance(build, dict) else build
+        if build is not None and not _path_is_within(context, repo):
+            findings.append(f"{name}: external build context is forbidden")
+        if isinstance(build, dict):
             if (
-                "${" in context_text
-                or "://" in context_text
-                or context_text.startswith("git@")
-                or not _inside(context_path, repo)
-            ):
-                findings.append(f"{name}: external build context")
-            if isinstance(build, dict):
-                dockerfile = build.get("dockerfile")
-                if dockerfile and (
-                    "${" in str(dockerfile)
-                    or "://" in str(dockerfile)
-                    or not _inside(_candidate_path(str(dockerfile), context_path), repo)
-                ):
-                    findings.append(f"{name}: external Dockerfile")
-                if build.get("privileged") or build.get("ssh") or build.get("secrets"):
-                    findings.append(f"{name}: unsafe build privilege/secret option")
-                if build.get("tags") or build.get("cache_to") or build.get("output"):
-                    findings.append(f"{name}: unsafe build exporter/tag option")
-                if str(build.get("network", "")).casefold() == "host":
-                    findings.append(f"{name}: host build network")
-                entitlements = {
-                    str(item).casefold() for item in build.get("entitlements", []) or []
-                }
-                if entitlements.intersection({"network.host", "security.insecure"}):
-                    findings.append(f"{name}: unsafe build entitlement")
-                additional = build.get("additional_contexts", {}) or {}
-                sources = (
-                    additional.values() if isinstance(additional, dict) else additional
+                any(
+                    build.get(key)
+                    for key in (
+                        "cache_from",
+                        "cache_to",
+                        "entitlements",
+                        "privileged",
+                        "secrets",
+                        "ssh",
+                    )
                 )
-                for entry in sources:
-                    source = str(entry).split("=", 1)[-1]
-                    if source.startswith(("service:", "docker-image://")):
-                        continue
-                    if (
-                        "${" in source
-                        or "://" in source
-                        or not _inside(_candidate_path(source, repo), repo)
-                    ):
-                        findings.append(f"{name}: external additional build context")
-
-        env_files = service.get("env_file", []) or []
-        if isinstance(env_files, (str, dict)):
-            env_files = [env_files]
-        for entry in env_files:
-            value = entry.get("path") if isinstance(entry, dict) else entry
-            if value and (
-                "${" in str(value)
-                or "://" in str(value)
-                or not _inside(_candidate_path(str(value), repo), repo)
+                or build.get("network") == "host"
             ):
-                findings.append(f"{name}: external env_file")
-
-    for section in ("volumes", "networks", "configs", "secrets"):
-        resources = config.get(section, {}) or {}
+                findings.append(f"{name}: host-backed build resources are forbidden")
+            additional_contexts = build.get("additional_contexts", {}) or {}
+            if isinstance(additional_contexts, dict):
+                additional_paths = additional_contexts.values()
+            elif isinstance(additional_contexts, list):
+                additional_paths = [
+                    str(item).split("=", 1)[-1] for item in additional_contexts
+                ]
+            else:
+                additional_paths = (None,)
+            if any(not _path_is_within(path, repo) for path in additional_paths):
+                findings.append(
+                    f"{name}: external additional build context is forbidden"
+                )
+            dockerfile = build.get("dockerfile")
+            context_root = Path(context) if isinstance(context, str) else repo
+            if not context_root.is_absolute():
+                context_root = repo / context_root
+            if dockerfile is not None and not _path_is_within(
+                dockerfile, repo, base=context_root
+            ):
+                findings.append(f"{name}: external Dockerfile is forbidden")
+    for kind in ("volumes", "networks"):
+        resources = config.get(kind, {}) or {}
         if not isinstance(resources, dict):
-            findings.append(f"invalid top-level {section}")
+            findings.append(f"{kind}: resource map is invalid")
             continue
         for name, resource in resources.items():
-            if not isinstance(resource, dict):
-                continue
-            if resource.get("external") is True:
-                findings.append(f"{section}.{name}: external resource")
-            driver = str(resource.get("driver", "")).casefold()
-            driver_options = resource.get("driver_opts") or {}
-            if section == "volumes" and (driver not in {"", "local"} or driver_options):
-                findings.append(f"{section}.{name}: unsafe volume driver/options")
-            if section == "networks" and driver not in {"", "bridge"}:
-                findings.append(f"{section}.{name}: unsafe network driver")
-            if section == "networks" and (
-                resource.get("driver_opts") or resource.get("ipam")
-            ):
-                findings.append(f"{section}.{name}: unsafe network options")
-            if section in {"configs", "secrets"} and driver:
-                findings.append(f"{section}.{name}: unsafe resource driver")
-            source = resource.get("file")
-            if source:
-                if not _inside(_candidate_path(str(source), repo), repo):
-                    findings.append(f"{section}.{name}: external file")
-                elif section in {"configs", "secrets"}:
-                    findings.append(f"{section}.{name}: repository file mount")
-    return sorted(set(findings))
+            if isinstance(resource, dict) and resource.get("external"):
+                findings.append(f"{kind}.{name}: external resource is forbidden")
+            if isinstance(resource, dict) and resource.get("driver_opts"):
+                findings.append(f"{kind}.{name}: driver options are forbidden")
+    for kind in ("secrets", "configs"):
+        if config.get(kind):
+            findings.append(f"{kind}: host-backed resources are forbidden")
+    return findings
 
 
-def _dotnet_build_declared(service: Any, repo: Path) -> bool:
-    if not isinstance(service, dict):
-        return False
-    build = service.get("build")
-    if not build:
-        return False
-    if isinstance(build, dict) and isinstance(build.get("dockerfile_inline"), str):
-        dockerfile_text = build["dockerfile_inline"]
-    else:
-        context_value = build.get("context", ".") if isinstance(build, dict) else build
-        context = Path(str(context_value)).expanduser()
-        if not context.is_absolute():
-            context = repo / context
-        dockerfile_value = (
-            build.get("dockerfile", "Dockerfile")
-            if isinstance(build, dict)
-            else "Dockerfile"
-        )
-        dockerfile = Path(str(dockerfile_value)).expanduser()
-        if not dockerfile.is_absolute():
-            dockerfile = context / dockerfile
-        if not _inside(context, repo) or not _inside(dockerfile, repo):
-            return False
-        try:
-            dockerfile_text = dockerfile.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-    stages = list(
-        re.finditer(
-            r"(?im)^\s*FROM(?:\s+--platform=\S+)?\s+(\S+)"
-            r"(?:\s+AS\s+(\S+))?.*$",
-            dockerfile_text,
-        )
-    )
-    if not stages:
-        return False
-    images = [match.group(1) for match in stages]
-    aliases = {
-        match.group(2).casefold(): match.group(1) for match in stages if match.group(2)
+def _compose_contract_findings(config: dict[str, Any], repo: Path) -> list[str]:
+    findings = _unsafe_compose_findings(config, repo)
+    services = config.get("services", {})
+    if not isinstance(services, dict):
+        return findings
+    missing = sorted(REQUIRED_SERVICES - set(services))
+    if missing:
+        findings.append(f"missing services: {', '.join(missing)}")
+        return findings
+    for name, service in services.items():
+        ports = _published_ports(service)
+        if name == "gateway":
+            if ports != {8080} or _target_ports(service) != {8080}:
+                findings.append("gateway must publish only host port 8080 to target 8080")
+        elif isinstance(service, dict) and service.get("ports"):
+            findings.append(f"{name}: only gateway may publish host ports")
+    provider = services["provider-simulator"]
+    if not _provider_image_matches(provider.get("image")):
+        findings.append("provider-simulator image must use the published digest")
+    if provider.get("build"):
+        findings.append("provider-simulator must not be locally built")
+    python_images = {str(services[name].get("image", "")) for name in PYTHON_SERVICES}
+    python_builds = [name for name in PYTHON_SERVICES if services[name].get("build")]
+    if len(python_images) != 1 or not next(iter(python_images), ""):
+        findings.append("Python integration services must declare one shared image")
+    if not python_builds:
+        findings.append("Python integration image must be locally built")
+    if any(
+        services[name].get("pull_policy") not in (None, "build")
+        for name in PYTHON_SERVICES
+    ):
+        findings.append("Python integration services must run the locally built image")
+    expected_roles = {
+        "outbox-dispatcher": "outbox_dispatcher",
+        "inbox-reconciler": "inbox_reconciler",
     }
-    target = build.get("target") if isinstance(build, dict) else None
-    if target:
-        selected = next(
-            (
-                index
-                for index, match in enumerate(stages)
-                if match.group(2)
-                and match.group(2).casefold() == str(target).casefold()
-            ),
-            None,
-        )
-        if selected is None:
-            return False
-    else:
-        selected = len(stages) - 1
-    block_end = (
-        stages[selected + 1].start()
-        if selected + 1 < len(stages)
-        else len(dockerfile_text)
-    )
-    final_block = dockerfile_text[stages[selected].end() : block_end]
+    for name, expected_role in expected_roles.items():
+        principals = _database_principals(_service_environment(services[name]))
+        if principals != {expected_role}:
+            findings.append(f"{name}: database principal must be {expected_role}")
+    adapter = services["receipt-adapter"]
+    adapter_environment = _service_environment(adapter)
+    if _database_environment_entries(adapter_environment):
+        findings.append("receipt-adapter must not receive PostgreSQL configuration")
+    return findings
 
-    def resolve_source(source: str) -> str:
-        current = source
-        visited: set[str] = set()
-        while current.casefold() in aliases and current.casefold() not in visited:
-            visited.add(current.casefold())
-            current = aliases[current.casefold()]
-        return current
 
-    runtime_command = " ".join(
-        str(value)
-        for value in (service.get("entrypoint"), service.get("command"))
-        if value is not None
-    )
-    if not runtime_command:
-        runtime_command = "\n".join(
-            re.findall(r"(?im)^\s*(?:ENTRYPOINT|CMD)\s+(.+)$", final_block)
-        )
-    project_names: set[str] = set()
-    for project in repo.rglob("*.csproj"):
-        if not _inside(project, repo):
-            continue
-        project_names.add(project.stem.casefold())
-        try:
-            project_text = project.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        project_names.update(
-            value.strip().casefold()
-            for value in re.findall(
-                r"(?is)<AssemblyName>\s*([^<]+?)\s*</AssemblyName>", project_text
-            )
-        )
-    command_text = runtime_command.casefold()
-    recognized_command = bool(
-        re.search(r"(?i)(?:\bdotnet\b|\.dll\b)", runtime_command)
-        or any(
-            re.search(
-                rf"(?:^|[\s\[\"'/]){re.escape(name)}(?:$|[\s,\]\"'])",
-                command_text,
-            )
-            for name in project_names
-        )
-    )
-    final_base_is_dotnet = (
-        "mcr.microsoft.com/dotnet/" in resolve_source(images[selected]).casefold()
-    )
-    copied_entrypoint_from_dotnet = False
-    copied_entrypoint_from_non_dotnet = False
-    for match in re.finditer(r"(?im)^\s*COPY\s+--from=([^\s]+)\s+(.+)$", final_block):
-        source = resolve_source(match.group(1))
-        destination = match.group(2).rsplit(maxsplit=1)[-1].strip("\"',[]")
-        destination = destination.rstrip("/").casefold()
-        if destination and destination in command_text:
-            if "mcr.microsoft.com/dotnet/" in source.casefold():
-                copied_entrypoint_from_dotnet = True
-            else:
-                copied_entrypoint_from_non_dotnet = True
-    dotnet_lineage = final_base_is_dotnet or copied_entrypoint_from_dotnet
-    return (
-        dotnet_lineage
-        and recognized_command
-        and not copied_entrypoint_from_non_dotnet
-        and not bool(
-            re.search(r"(?i)\b(?:python\d*|node|java|ruby|php)\b", runtime_command)
-        )
-    )
+def _runtime_compose_findings(
+    config: dict[str, Any], gateway_port: int
+) -> list[str]:
+    services = config.get("services", {})
+    if not isinstance(services, dict):
+        return ["runtime services must be an object"]
+    gateway = services.get("gateway")
+    findings: list[str] = []
+    if _published_ports(gateway) != {gateway_port}:
+        findings.append("runtime gateway must publish only the selected host port")
+    if _target_ports(gateway) != {8080}:
+        findings.append("runtime gateway must target container port 8080")
+    for name, service in services.items():
+        if name != "gateway" and isinstance(service, dict) and service.get("ports"):
+            findings.append(f"{name}: runtime override must remove host ports")
+    return findings
 
 
 class ComposeHarness:
@@ -1161,86 +950,46 @@ class ComposeHarness:
         self,
         *,
         repo: Path,
-        fixtures: Path,
         compose_file: Path,
-        compose_wrapper: Path,
         override_file: Path,
+        wrapper: Path,
         project: str,
         gateway_port: int,
+        environment: dict[str, str],
         sensitive: Sequence[str],
     ) -> None:
         self.repo = repo
-        self.fixtures = fixtures
         self.compose_file = compose_file
-        self.compose_wrapper = compose_wrapper
         self.override_file = override_file
+        self.wrapper = wrapper
         self.project = project
         self.gateway_port = gateway_port
-        self.sensitive = tuple(item for item in sensitive if item)
+        self.environment = environment
+        self.sensitive = tuple(sensitive)
         self.commands: list[dict[str, Any]] = []
-
-    def _environment(self, failpoint: str = "") -> dict[str, str]:
-        environment = {
-            "PATH": os.environ.get("PATH", os.defpath),
-            "HOME": os.environ.get("HOME", str(Path.home())),
-            "COURSE_GATEWAY_PORT": str(self.gateway_port),
-            "COURSE_TEST_PROFILE": "1",
-            "COURSE_FAILPOINT": failpoint,
-            "COMPOSE_DISABLE_ENV_FILE": "1",
-        }
-        for key in ("DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT"):
-            if key in os.environ:
-                environment[key] = os.environ[key]
-        return environment
-
-    def _redacted_command(self, command: Sequence[str]) -> list[str]:
-        replacements = {
-            str(self.repo): "<repo>",
-            str(self.fixtures): "<fixtures>",
-            str(self.override_file): "<trusted-override>",
-        }
-        rendered: list[str] = []
-        hide_next = False
-        for part in command:
-            value = str(part)
-            if hide_next:
-                rendered.append("<read-only-query>")
-                hide_next = False
-                continue
-            for original, replacement in replacements.items():
-                value = value.replace(original, replacement)
-            for item in self.sensitive:
-                value = value.replace(item, "<redacted>")
-            rendered.append(value)
-            if value == "-c":
-                hide_next = True
-        return rendered
+        self.python_executables: dict[str, str] = {}
 
     def run(
         self,
         command: Sequence[str],
         *,
-        timeout: float,
-        input_text: str | None = None,
-        failpoint: str = "",
+        timeout: float = 120,
+        environment: dict[str, str] | None = None,
     ) -> CommandResult:
+        started = time.monotonic()
         try:
             completed = subprocess.run(
-                [str(part) for part in command],
+                list(command),
                 cwd=self.repo,
-                env=self._environment(failpoint),
+                env={**os.environ, **self.environment, **(environment or {})},
                 text=True,
-                input=input_text,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout,
                 check=False,
             )
             result = CommandResult(
-                tuple(str(part) for part in command),
-                completed.returncode,
-                completed.stdout,
-                completed.stderr,
+                tuple(command), completed.returncode, completed.stdout, completed.stderr
             )
         except subprocess.TimeoutExpired as error:
             stdout = (
@@ -1254,2448 +1003,1655 @@ class ComposeHarness:
                 else error.stderr
             )
             result = CommandResult(
-                tuple(str(part) for part in command),
-                124,
-                stdout or "",
-                stderr or "",
-                True,
+                tuple(command), 124, stdout or "", stderr or "", timed_out=True
             )
-        except OSError as error:
-            result = CommandResult(
-                tuple(str(part) for part in command), 127, "", str(error)
-            )
+        safe_command = [
+            "[redacted-argument]" if len(str(argument)) > 256 else str(argument)
+            for argument in command
+        ]
         self.commands.append(
             {
-                "command": self._redacted_command(result.command),
+                "command": _redact(safe_command, self.sensitive),
                 "exitCode": result.returncode,
                 "timedOut": result.timed_out,
+                "durationMs": int((time.monotonic() - started) * 1000),
             }
         )
         return result
 
+    def require_docker_result(self, result: CommandResult, message: str) -> None:
+        if result.ok:
+            return
+        probe = self.run(
+            ("docker", "info", "--format", "{{.ServerVersion}}"), timeout=15
+        )
+        if not probe.ok:
+            raise EnvironmentFailure("Docker daemon became unavailable")
+        raise ContractError(message)
+
     def compose(
         self,
-        arguments: Sequence[str],
+        args: Sequence[str],
         *,
-        timeout: float = 60,
-        input_text: str | None = None,
-        failpoint: str = "",
+        override: bool = True,
+        timeout: float = 120,
+        environment: dict[str, str] | None = None,
     ) -> CommandResult:
         command = [
-            "bash",
-            str(self.compose_wrapper),
+            str(self.wrapper),
             "--project-name",
             self.project,
             "-f",
             str(self.compose_file),
-            "-f",
-            str(self.override_file),
-            *arguments,
         ]
-        return self.run(
-            command, timeout=timeout, input_text=input_text, failpoint=failpoint
+        if override:
+            command.extend(("-f", str(self.override_file)))
+        command.extend(args)
+        return self.run(command, timeout=timeout, environment=environment)
+
+    def candidate_config(self) -> CommandResult:
+        return self.compose(
+            ("config", "--format", "json", "--no-env-resolution"),
+            override=False,
+            timeout=30,
+            environment={"COURSE_GATEWAY_PORT": "8080"},
         )
 
-    def compose_candidate(
-        self, arguments: Sequence[str], *, timeout: float = 60
-    ) -> CommandResult:
-        return self.run(
-            [
-                "bash",
-                str(self.compose_wrapper),
-                "--project-name",
-                self.project,
-                "-f",
-                str(self.compose_file),
-                *arguments,
-            ],
-            timeout=timeout,
+    def runtime_config(self) -> CommandResult:
+        return self.compose(
+            ("config", "--format", "json", "--no-env-resolution"),
+            timeout=30,
         )
 
-    @staticmethod
-    def _environment_error(result: CommandResult) -> bool:
-        return result.returncode == 127 or bool(
-            _TRANSPORT_ERROR.search(result.stdout + "\n" + result.stderr)
+    def container_id(self, service: str) -> str:
+        result = self.compose(("ps", "-q", service), timeout=15)
+        value = result.stdout.strip()
+        self.require_docker_result(
+            result, f"service {service} has no running container"
         )
+        if re.fullmatch(r"[a-f0-9]{12,64}", value) is None:
+            raise ContractError(f"service {service} has no running container")
+        return value
 
-    def require(self, result: CommandResult, message: str) -> None:
-        if result.ok:
-            return
-        if self._environment_error(result):
-            raise EnvironmentFailure(message)
-        suffix = " (timed out)" if result.timed_out else f" (exit {result.returncode})"
-        raise ContractError(message + suffix)
+    def image_id(self, service: str) -> str:
+        container = self.container_id(service)
+        result = self.run(("docker", "inspect", "--format", "{{.Image}}", container))
+        value = result.stdout.strip()
+        self.require_docker_result(result, f"cannot inspect image for {service}")
+        if re.fullmatch(r"sha256:[a-f0-9]{64}", value) is None:
+            raise ContractError(f"cannot inspect image for {service}")
+        return value
 
-    def cli(
-        self, *arguments: str, timeout: float = 120, input_text: str | None = None
-    ) -> tuple[CommandResult, dict[str, Any] | None]:
-        result = self.compose(
-            [
-                "run",
-                "--rm",
-                "-T",
-                "--no-deps",
-                "-v",
-                f"{self.fixtures}:/autocheck/input:ro",
-                "cli",
-                *arguments,
-            ],
-            timeout=timeout,
-            input_text=input_text,
+    def local_image_id(self, image: str) -> str:
+        result = self.run(
+            ("docker", "image", "inspect", "--format", "{{.Id}}", image),
+            timeout=15,
         )
-        if self._environment_error(result):
-            raise EnvironmentFailure(
-                "Docker transport failed while running the trusted CLI adapter"
-            )
-        return result, extract_cli_json(result.stdout)
-
-    @staticmethod
-    def ok_envelope(result: CommandResult, body: dict[str, Any] | None) -> bool:
-        return (
-            result.ok
-            and isinstance(body, dict)
-            and body.get("status") == "ok"
-            and isinstance(body.get("meta"), dict)
-            and body["meta"].get("contractVersion") == "course-1"
+        value = result.stdout.strip()
+        self.require_docker_result(
+            result, "cannot inspect the locally built Python image"
         )
+        if re.fullmatch(r"sha256:[a-f0-9]{64}", value) is None:
+            raise ContractError("cannot inspect the locally built Python image")
+        return value
 
-    @staticmethod
-    def error_envelope(result: CommandResult, body: dict[str, Any] | None) -> bool:
-        return (
-            not result.ok
-            and isinstance(body, dict)
-            and body.get("status") == "error"
-            and isinstance(body.get("code"), str)
-            and bool(body.get("code"))
-            and isinstance(body.get("meta"), dict)
-            and body["meta"].get("contractVersion") == "course-1"
+    def main_process_executable(self, service: str) -> str:
+        container = self.container_id(service)
+        result = self.run(
+            (
+                "docker",
+                "inspect",
+                "--format",
+                "{{.Path}}",
+                container,
+            ),
+            timeout=15,
         )
+        value = result.stdout.strip()
+        self.require_docker_result(result, f"cannot inspect main process for {service}")
+        if not value or "\n" in value or "\r" in value:
+            raise ContractError(f"cannot inspect main process for {service}")
+        configured_name = Path(value).name.lower()
+        if configured_name == "dotnet" or re.fullmatch(
+            r"python(?:3(?:\.\d+)?)?", configured_name
+        ):
+            return value
+        pid_result = self.run(
+            ("docker", "inspect", "--format", "{{.State.Pid}}", container),
+            timeout=15,
+        )
+        self.require_docker_result(
+            pid_result, f"cannot inspect main process for {service}"
+        )
+        root_pid = pid_result.stdout.strip()
+        top_result = self.run(
+            ("docker", "top", container, "-eo", "pid,ppid,comm"), timeout=15
+        )
+        self.require_docker_result(
+            top_result, f"cannot inspect main process for {service}"
+        )
+        rows: list[tuple[str, str, str]] = []
+        for line in top_result.stdout.splitlines()[1:]:
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3:
+                rows.append((parts[0], parts[1], parts[2]))
+        root_rows = [row for row in rows if row[0] == root_pid]
+        if len(root_rows) != 1:
+            raise ContractError(f"cannot inspect main process for {service}")
+        executable = root_rows[0][2]
+        wrappers = {"ash", "bash", "dash", "docker-init", "dumb-init", "sh", "tini"}
+        if Path(executable).name.lower() in wrappers:
+            children = [row for row in rows if row[1] == root_pid]
+            if len(children) != 1:
+                raise ContractError(f"cannot identify workload process for {service}")
+            executable = children[0][2]
+        return executable
 
-    @staticmethod
-    def error_code(body: dict[str, Any] | None) -> str | None:
-        value = body.get("code") if isinstance(body, dict) else None
-        return value if isinstance(value, str) else None
+    def process_text(self, service: str) -> str:
+        result = self.run(
+            ("docker", "top", self.container_id(service), "-eo", "pid,comm,args"),
+            timeout=15,
+        )
+        self.require_docker_result(result, f"cannot inspect process for {service}")
+        return result.stdout.lower()
 
-    def _psql_rows(
+    def process_commands(self, service: str) -> tuple[str, ...]:
+        lines = self.process_text(service).splitlines()
+        commands: list[str] = []
+        for line in lines[1:]:
+            parts = line.split(maxsplit=2)
+            if len(parts) >= 2:
+                commands.append(parts[1])
+        return tuple(commands)
+
+    def detect_python_runtime(self, service: str) -> tuple[int, int, int]:
+        container = self.container_id(service)
+        executable = self.main_process_executable(service)
+        if re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(executable).name) is None:
+            raise ContractError(f"main process for {service} is not Python")
+        result = self.run(
+            ("docker", "exec", container, executable, "--version"),
+            timeout=15,
+        )
+        match = re.search(
+            r"Python\s+(\d+)\.(\d+)\.(\d+)",
+            result.stdout + "\n" + result.stderr,
+        )
+        self.require_docker_result(
+            result, f"cannot determine Python runtime for {service}"
+        )
+        if match is None:
+            raise ContractError(f"cannot determine Python runtime for {service}")
+        self.python_executables[service] = executable
+        return tuple(int(value) for value in match.groups())
+
+    def http(
         self,
-        query: str,
+        method: str,
+        path: str,
         *,
-        allowed_fixture_relation: tuple[str, str] | None = None,
-        timeout: float = 10,
-        container_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        validate_read_only_query(query, allowed_fixture_relation)
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30,
+    ) -> HttpResult:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.gateway_port}{path}",
+            method=method,
+            data=body,
+            headers=headers or {},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return HttpResult(
+                    response.status,
+                    response.read(1024 * 1024),
+                    dict(response.headers.items()),
+                )
+        except urllib.error.HTTPError as error:
+            return HttpResult(
+                error.code,
+                error.read(1024 * 1024),
+                dict(error.headers.items()),
+            )
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as error:
+            raise ContractError(f"candidate HTTP transport failed: {error}") from error
+
+    def wait_gateway(self, timeout: float = 300) -> None:
+        deadline = time.monotonic() + timeout
+        last = 0
+        while time.monotonic() < deadline:
+            try:
+                response = self.http("GET", "/health/ready", timeout=2)
+                last = response.status
+                if response.status == 200:
+                    return
+            except ContractError:
+                pass
+            time.sleep(0.25)
+        raise ContractError(f"gateway readiness did not become 200 (last={last})")
+
+    def action(
+        self,
+        module: str,
+        action: str,
+        payload: dict[str, Any],
+        token: str,
+        *,
+        idempotency_key: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> HttpResult:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Action-Version": "1",
+        }
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
+        if extra_headers:
+            headers.update(extra_headers)
+        return self.http(
+            "POST",
+            f"/api/{module}/{action}",
+            body=receipt_bytes(payload),
+            headers=headers,
+        )
+
+    def psql_rows(self, query: str, timeout: float = 30) -> list[dict[str, Any]]:
+        if ";" in query:
+            raise ValueError("checker query is not read-only")
         wrapped = (
             "SELECT COALESCE(jsonb_agg(to_jsonb(q)), '[]'::jsonb)::text "
             f"FROM ({query}) AS q"
         )
-        psql = [
-            "psql",
-            "-X",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-U",
-            "postgres",
-            "-d",
-            "course",
-            "-At",
-            "-c",
-            wrapped,
-        ]
-        if container_id is None:
-            result = self.compose(["exec", "-T", "postgres", *psql], timeout=timeout)
-        else:
-            if re.fullmatch(r"[a-f0-9]{12,64}", container_id) is None:
-                raise ValueError("PostgreSQL container id is invalid")
-            result = self.run(["docker", "exec", container_id, *psql], timeout=timeout)
+        result = self.compose(
+            (
+                "exec",
+                "-T",
+                "postgres",
+                "psql",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "postgres",
+                "-d",
+                "course",
+                "-At",
+                "-c",
+                wrapped,
+            ),
+            timeout=timeout,
+        )
         if not result.ok:
-            if self._environment_error(result):
-                raise EnvironmentFailure(
-                    "PostgreSQL transport failed during a stable-view query"
-                )
-            raise ContractError("A required read-only PostgreSQL contract query failed")
+            self.require_docker_result(
+                result, "required read-only PostgreSQL query failed"
+            )
         try:
             value = json.loads(result.stdout.strip())
         except json.JSONDecodeError as error:
-            raise ContractError(
-                "A required PostgreSQL view did not return JSON rows"
-            ) from error
+            raise ContractError("PostgreSQL query did not return JSON rows") from error
         if not isinstance(value, list) or not all(
             isinstance(row, dict) for row in value
         ):
-            raise ContractError(
-                "A required PostgreSQL view returned an invalid row shape"
-            )
+            raise ContractError("PostgreSQL query returned an invalid shape")
         return value
 
-    def psql_rows(
-        self, query: str, timeout: float = 10, *, container_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        return self._psql_rows(query, timeout=timeout, container_id=container_id)
-
-    @staticmethod
-    def _container_addresses(result: CommandResult) -> set[str]:
-        if not result.ok:
-            return set()
-        addresses: set[str] = set()
-        for value in result.stdout.split():
-            for family in (socket.AF_INET, socket.AF_INET6):
-                try:
-                    socket.inet_pton(family, value)
-                except OSError:
-                    continue
-                addresses.add(value)
-                break
-        return addresses
-
-    def _service_addresses(self, service: str) -> tuple[bool, set[str]]:
-        containers = self.compose(["ps", "-q", service], timeout=10)
-        if not containers.ok:
-            if self._environment_error(containers):
-                raise EnvironmentFailure(
-                    "Docker transport failed during the worker address probe"
-                )
-            return False, set()
-        container_ids = [
-            item.strip() for item in containers.stdout.splitlines() if item.strip()
-        ]
-        if (
-            len(container_ids) != 1
-            or re.fullmatch(r"[a-f0-9]{12,64}", container_ids[0]) is None
-        ):
-            return False, set()
-        inspected = self.run(
-            [
-                "docker",
-                "inspect",
-                "--format",
-                "{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{println .GlobalIPv6Address}}{{end}}",
-                container_ids[0],
-            ],
-            timeout=10,
-        )
-        if not inspected.ok and self._environment_error(inspected):
-            raise EnvironmentFailure(
-                "Docker transport failed during the worker address probe"
-            )
-        addresses = self._container_addresses(inspected)
-        return inspected.ok and bool(addresses), addresses
-
-    def service_container_ids(
-        self, services: Sequence[str], *, include_stopped: bool = False
-    ) -> dict[str, str]:
-        arguments = ["ps", "-aq" if include_stopped else "-q"]
-        result: dict[str, str] = {}
-        for service in services:
-            containers = self.compose([*arguments, service], timeout=10)
-            self.require(containers, f"Cannot resolve the {service} container")
-            values = [
-                item.strip() for item in containers.stdout.splitlines() if item.strip()
-            ]
-            if len(values) != 1 or re.fullmatch(r"[a-f0-9]{12,64}", values[0]) is None:
-                raise ContractError(f"Expected exactly one {service} container")
-            result[service] = values[0]
-        return result
-
-    def worker_database_security(self) -> dict[str, Any]:
-        service_addresses: dict[str, set[str]] = {}
-        address_probes: dict[str, bool] = {}
-        for service in ("worker-a", "worker-b"):
-            address_probes[service], service_addresses[service] = (
-                self._service_addresses(service)
-            )
-
-        addresses = sorted(
-            {address for values in service_addresses.values() for address in values}
-        )
-        sessions: list[dict[str, Any]] = []
-        if addresses:
-            literals = ", ".join(_sql_literal(address) for address in addresses)
-            sessions = self.psql_rows(
-                "SELECT host(client_addr) AS client_addr, usename AS session_role, "
-                "count(*)::integer AS session_count FROM pg_catalog.pg_stat_activity "
-                "WHERE datname = current_database() AND client_addr IS NOT NULL "
-                f"AND host(client_addr) IN ({literals}) "
-                "GROUP BY host(client_addr), usename ORDER BY host(client_addr), usename"
-            )
-
-        physical_tables = self.psql_rows(
-            "WITH worker_role AS ("
-            "SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'workflow_worker'"
-            ") SELECT n.nspname AS schema_name, c.relname AS table_name, "
-            "has_table_privilege(r.oid, c.oid, 'INSERT') AS has_insert, "
-            "has_table_privilege(r.oid, c.oid, 'UPDATE') AS has_update, "
-            "has_table_privilege(r.oid, c.oid, 'DELETE') AS has_delete "
-            "FROM pg_catalog.pg_class c "
-            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-            "LEFT JOIN worker_role r ON true "
-            "WHERE c.relkind IN ('r', 'p', 'f') "
-            "AND n.nspname <> 'information_schema' "
-            "AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' "
-            "ORDER BY n.nspname, c.relname"
-        )
-        function_privileges = self.psql_rows(
-            "WITH worker_role AS ("
-            "SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'workflow_worker'"
-            ") SELECT n.nspname AS schema_name, p.proname AS function_name, "
-            "has_function_privilege(r.oid, p.oid, 'EXECUTE') AS can_execute "
-            "FROM pg_catalog.pg_proc p "
-            "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
-            "LEFT JOIN worker_role r ON true "
-            "WHERE n.nspname IN ('api', 'workflow') "
-            "ORDER BY n.nspname, p.proname, p.oid"
-        )
-        allowed_boundaries = {
-            ("api", "invoke"),
-            ("workflow", "claim_jobs"),
-            ("workflow", "finish_job"),
-            ("workflow", "fail_job"),
-        }
-        executable_boundaries = {
-            (str(row.get("schema_name")), str(row.get("function_name")))
-            for row in function_privileges
-            if row.get("can_execute") is True
-        }
-        services: dict[str, dict[str, Any]] = {}
-        for service, service_ips in service_addresses.items():
-            roles = sorted(
-                {
-                    str(row["session_role"])
-                    for row in sessions
-                    if row.get("client_addr") in service_ips
-                    and isinstance(row.get("session_role"), str)
-                }
-            )
-            services[service] = {
-                "addressProbe": address_probes[service],
-                "addressCount": len(service_ips),
-                "sessionRoles": roles,
-                "roleVerified": roles == ["workflow_worker"],
-            }
-        return {
-            "services": services,
-            "roleVerified": all(item["roleVerified"] for item in services.values()),
-            "physicalTableCount": len(physical_tables),
-            "allDmlDenied": bool(physical_tables)
-            and all(
-                row.get("has_insert") is False
-                and row.get("has_update") is False
-                and row.get("has_delete") is False
-                for row in physical_tables
-            ),
-            "executeBoundaryRestricted": executable_boundaries == allowed_boundaries,
-            "executableFunctionCount": len(executable_boundaries),
-        }
-
-    def wait_worker_database_security(
-        self, *, timeout: float = 5, interval: float = 0.1
-    ) -> dict[str, Any]:
-        deadline = time.monotonic() + timeout
-        report: dict[str, Any] = {}
-        while True:
-            report = self.worker_database_security()
-            if report.get("roleVerified") is True:
-                return report
-            now = time.monotonic()
-            if now >= deadline:
-                return report
-            time.sleep(min(interval, max(0.0, deadline - now)))
-
-    def effect_rows(
-        self, schema: str, table: str, execution_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        for value in (schema, table):
-            if re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value) is None:
-                raise ValueError("Unsafe fixture relation identifier")
-        where = (
-            ""
-            if execution_id is None
-            else f" WHERE execution_id = {_sql_literal(execution_id)}"
-        )
-        return self._psql_rows(
-            "SELECT execution_id, business_value, created_at "
-            f"FROM {schema}.{table}{where} ORDER BY execution_id",
-            allowed_fixture_relation=(schema, table),
-        )
-
-    def image_id(self, service: str) -> str:
-        config = self.compose(
-            ["config", "--format", "json", "--no-env-resolution"], timeout=30
-        )
-        self.require(config, f"Cannot resolve the {service} image reference")
-        try:
-            definition = json.loads(config.stdout)["services"][service]
-        except (KeyError, TypeError, json.JSONDecodeError) as error:
-            raise ContractError(
-                f"Compose did not return an image reference for {service}"
-            ) from error
-        reference = definition.get("image") if isinstance(definition, dict) else None
-        if (
-            reference is None
-            and isinstance(definition, dict)
-            and definition.get("build")
-        ):
-            reference = f"{self.project}-{service}"
-        if not isinstance(reference, str) or not reference or "\n" in reference:
-            raise ContractError(
-                f"Compose returned an invalid image reference for {service}"
-            )
-        result = self.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", reference],
-            timeout=30,
-        )
-        self.require(result, f"Cannot inspect the {service} image ID")
-        return _normalize_image_id(result.stdout)
-
-    def wait_ready(self, timeout: float, interval: float = 0.1) -> bool:
-        if interval <= 0 or interval > 0.1:
-            raise ValueError("Readiness polling interval must not exceed 100 ms")
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        deadline = time.monotonic() + timeout
-        while True:
-            statuses: list[int] = []
-            for path in ("/health/live", "/health/ready"):
-                try:
-                    with opener.open(
-                        f"http://127.0.0.1:{self.gateway_port}{path}", timeout=2
-                    ) as response:
-                        statuses.append(response.status)
-                except (urllib.error.URLError, TimeoutError, OSError):
-                    statuses.append(0)
-            if statuses == [200, 200]:
-                return True
-            now = time.monotonic()
-            if now >= deadline:
-                return False
-            time.sleep(min(interval, max(0.0, deadline - now)))
-
-    def post_action(
-        self, module: str, action: str, payload: dict[str, Any], scopes: Sequence[str]
-    ) -> HttpResult:
-        token = issue_token(self.sensitive[0], "public-check-client", scopes)
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{self.gateway_port}/api/{module}/{action}",
-            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Idempotency-Key": f"public-check-{uuid.uuid4()}",
-            },
-        )
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        try:
-            with opener.open(request, timeout=10) as response:
-                status = response.status
-                raw = response.read(1_048_577)
-        except urllib.error.HTTPError as error:
-            status = error.code
-            raw = error.read(1_048_577)
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            return HttpResult(0, None, f"{type(error).__name__}: {error}")
-        if len(raw) > 1_048_576:
-            return HttpResult(status, None, "response body exceeded 1 MiB")
-        try:
-            body = json.loads(raw.decode("utf-8")) if raw else None
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            body = None
-        return HttpResult(status, body if isinstance(body, dict) else None)
-
-    def poll_rows(
-        self,
-        query: str,
-        predicate: Callable[[list[dict[str, Any]]], bool],
-        *,
-        timeout: float = 8,
-        interval: float = 0.05,
-        container_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        if interval <= 0 or interval > 0.1:
-            raise ValueError("State polling interval must not exceed 100 ms")
-        deadline = time.monotonic() + timeout
-        while True:
-            rows = self.psql_rows(
-                query, timeout=min(10, timeout), container_id=container_id
-            )
-            if predicate(rows):
-                return rows
-            now = time.monotonic()
-            if now >= deadline:
-                raise ContractError(
-                    "A required state predicate was not reached before its deadline"
-                )
-            time.sleep(min(interval, max(0.0, deadline - now)))
-
-    def wait_failpoint(
+    def internal_http(
         self,
         service: str,
-        name: str,
+        method: str,
+        url: str,
         *,
-        timeout: float = 8,
-        interval: float = 0.05,
-        container_id: str | None = None,
-    ) -> dict[str, str]:
-        if interval <= 0 or interval > 0.1:
-            raise ValueError("Failpoint polling interval must not exceed 100 ms")
-        deadline = time.monotonic() + timeout
-        successful_reads = 0
-        while True:
-            logs = (
-                self.compose(["logs", "--no-color", service], timeout=min(10, timeout))
-                if container_id is None
-                else self.run(["docker", "logs", container_id], timeout=min(1, timeout))
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> HttpResult:
+        script = (
+            "import base64,json,sys,urllib.error,urllib.request;"
+            "data=base64.b64decode(sys.argv[3]) if sys.argv[3] else None;"
+            "req=urllib.request.Request(sys.argv[2],data=data,method=sys.argv[1],"
+            "headers=json.loads(sys.argv[4]));"
+            "status=0;out=b'';hdr={};"
+            "\ntry:\n r=urllib.request.urlopen(req,timeout=15);status=r.status;"
+            "out=r.read(1048576);hdr=dict(r.headers.items())"
+            "\nexcept urllib.error.HTTPError as e:\n status=e.code;"
+            "out=e.read(1048576);hdr=dict(e.headers.items())"
+            "\nprint(json.dumps({'status':status,'data':base64.b64encode(out).decode(),"
+            "'headers':hdr},separators=(',',':')))"
+        )
+        encoded = ""
+        if body is not None:
+            encoded = base64.b64encode(receipt_bytes(body)).decode("ascii")
+        result = self.compose(
+            (
+                "exec",
+                "-T",
+                service,
+                self.python_executables.get(service, "python3"),
+                "-c",
+                script,
+                method,
+                url,
+                encoded,
+                json.dumps(headers or {}, separators=(",", ":")),
+            ),
+            timeout=30,
+        )
+        self.require_docker_result(result, f"internal HTTP probe failed in {service}")
+        try:
+            value = json.loads(result.stdout.strip())
+            return HttpResult(
+                int(value["status"]),
+                base64.b64decode(value["data"]),
+                {str(key): str(item) for key, item in value["headers"].items()},
             )
-            if logs.ok:
-                successful_reads += 1
-                acknowledgements = parse_failpoint_acks(
-                    logs.stdout + "\n" + logs.stderr, name
-                )
-                if len(acknowledgements) > 1:
-                    raise ContractError(
-                        f"Worker emitted more than one structured {name} acknowledgement"
-                    )
-                if acknowledgements:
-                    return acknowledgements[0]
-            elif self._environment_error(logs):
-                raise EnvironmentFailure(
-                    "Docker logs transport failed during failpoint polling"
-                )
-            now = time.monotonic()
-            if now >= deadline:
-                if successful_reads:
-                    raise ContractError(
-                        f"No structured {name} acknowledgement was emitted"
-                    )
-                raise EnvironmentFailure(
-                    "No worker log read succeeded during failpoint polling"
-                )
-            time.sleep(min(interval, max(0.0, deadline - now)))
-
-    def wait_single_winner(
-        self,
-        services: Sequence[str],
-        name: str,
-        *,
-        timeout: float = 8,
-        interval: float = 0.05,
-        stability: float = 0.2,
-    ) -> tuple[str, str, dict[str, str]]:
-        if len(services) != 2 or len(set(services)) != 2:
-            raise ValueError("Exactly two workers are required")
-        deadline = time.monotonic() + timeout
-        successful_reads = 0
-        observed_winner: str | None = None
-        observed_at: float | None = None
-        while True:
-            remaining = max(0.1, deadline - time.monotonic())
-            logs = self.compose(
-                ["logs", "--no-color", *services], timeout=min(remaining, 1.0)
-            )
-            acknowledgements: dict[str, dict[str, str]] = {}
-            if logs.ok:
-                successful_reads += 1
-                parsed = parse_failpoint_acks(logs.stdout + "\n" + logs.stderr, name)
-                if any(ack["instanceId"] not in services for ack in parsed):
-                    raise ContractError(
-                        "A failpoint acknowledgement used an unexpected instanceId"
-                    )
-                counts = {
-                    service: sum(ack["instanceId"] == service for ack in parsed)
-                    for service in services
-                }
-                if any(count > 1 for count in counts.values()):
-                    raise ContractError(
-                        "A worker emitted more than one claim acknowledgement"
-                    )
-                acknowledgements = {ack["instanceId"]: ack for ack in parsed}
-            elif self._environment_error(logs):
-                raise EnvironmentFailure(
-                    "Docker logs transport failed during winner polling"
-                )
-            if len(acknowledgements) > 1:
-                raise ContractError(
-                    "More than one worker acknowledged one logical job claim"
-                )
-            if len(acknowledgements) == 1:
-                winner, ack = next(iter(acknowledgements.items()))
-                now = time.monotonic()
-                if observed_winner != winner:
-                    observed_winner = winner
-                    observed_at = now
-                elif observed_at is not None and now - observed_at >= stability:
-                    loser = next(service for service in services if service != winner)
-                    return winner, loser, ack
-            else:
-                observed_winner = None
-                observed_at = None
-            now = time.monotonic()
-            if now >= deadline:
-                if not successful_reads:
-                    raise EnvironmentFailure(
-                        "No complete worker log read succeeded during winner polling"
-                    )
-                raise ContractError(
-                    "Neither worker acknowledged the deterministic job claim"
-                )
-            time.sleep(min(interval, max(0.0, deadline - now)))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ContractError("internal HTTP probe returned invalid data") from error
 
 
 class PublicChecker:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.repo = args.repo.expanduser().resolve()
-        self.fixtures = args.fixtures.expanduser().resolve()
-        self.output = args.output
-        self.fixture = load_fixture(self.fixtures)
-        self.fixture_digest = canonical_fixture_digest(self.fixtures)
-        self.files = self.fixture["files"]
-        self.flow = str(self.fixture["flowName"])
-        self.module = str(self.fixture["module"])
-        self.action = str(self.fixture["action"])
-        self.compose_file = self._resolve_compose_file()
-        self.compose_wrapper = args.compose_wrapper.expanduser().resolve()
-        if not self.compose_wrapper.is_file():
-            raise FixtureError("Trusted safe_compose.sh is missing")
-        self.temp = Path(tempfile.mkdtemp(prefix="moduledev-week2-public-"))
-        self.override = self.temp / "autocheck.override.yaml"
-        self.secret = secrets.token_urlsafe(48)
-        self.project = f"moduledev-w2-{uuid.uuid4().hex[:12]}"
-        self.gateway_port = self._free_port()
-        self.cleanup_armed = False
-        self.created_image_tags: list[str] = []
-        self._write_override()
-        self.harness = ComposeHarness(
-            repo=self.repo,
-            fixtures=self.fixtures,
-            compose_file=self.compose_file,
-            compose_wrapper=self.compose_wrapper,
-            override_file=self.override,
-            project=self.project,
-            gateway_port=self.gateway_port,
-            sensitive=(self.secret,),
-        )
+        self.repo = Path(args.repo).resolve()
+        self.fixtures = Path(args.fixtures).resolve()
+        self.output = Path(args.output).resolve()
+        self.wrapper = Path(args.compose_wrapper).resolve()
+        self.fixture: dict[str, Any] = {}
         self.checks: list[dict[str, Any]] = []
-        self.baseline_images: dict[str, str] = {}
-        self.processes: dict[str, str] = {}
+        self.cleanup_armed = False
+        self.override = Path(tempfile.mkdtemp(prefix="week3-check-")) / "override.yaml"
+        self.project = f"week3-public-{secrets.token_hex(4)}"
+        self.gateway_port = self._free_port()
+        self.jwt_secret = secrets.token_urlsafe(48)
+        self.hmac_secret = secrets.token_urlsafe(40)
+        self.capability = secrets.token_urlsafe(24)
+        self.audit_token = secrets.token_urlsafe(24)
+        self.database_secrets = {
+            name: secrets.token_urlsafe(32)
+            for name in (
+                "COURSE_POSTGRES_PASSWORD",
+                "COURSE_MIGRATOR_PASSWORD",
+                "COURSE_PUBLISHER_PASSWORD",
+                "COURSE_RUNTIME_PASSWORD",
+                "COURSE_WORKER_PASSWORD",
+                "COURSE_OUTBOX_PASSWORD",
+                "COURSE_INBOX_PASSWORD",
+            )
+        }
+        self.issuer = "moduledev-course"
+        self.audience = "moduledev-api"
+        self.callback_base = ""
+        self.receipt_token = issue_token(
+            self.jwt_secret,
+            "receipt-provider",
+            "integration",
+            ("receipt:write",),
+            issuer=self.issuer,
+            audience=self.audience,
+        )
+        self.client_token = issue_token(
+            self.jwt_secret,
+            "candidate-client",
+            "web",
+            ("payment:write", "payment:read", "workflow:read"),
+            issuer=self.issuer,
+            audience=self.audience,
+        )
+        self.reviewer_token = issue_token(
+            self.jwt_secret,
+            "reviewer",
+            "backoffice",
+            ("workflow:manual", "payment:read"),
+            issuer=self.issuer,
+            audience=self.audience,
+        )
+        environment = {
+            "COMPOSE_PARALLEL_LIMIT": "2",
+            "COURSE_GATEWAY_PORT": str(self.gateway_port),
+            "COURSE_TEST_PROFILE": "1",
+            "COURSE_JWT_ISSUER": self.issuer,
+            "COURSE_JWT_AUDIENCE": self.audience,
+            "COURSE_JWT_SIGNING_KEY": self.jwt_secret,
+            "PROVIDER_URL": "http://provider-simulator:8081",
+            "OUTBOX_OWNER": "outbox-dispatcher",
+            "PROVIDER_CALLBACK_CAPABILITY": self.capability,
+            "PROVIDER_CALLBACK_TOKEN": self.receipt_token,
+            "PROVIDER_HMAC_SECRET": self.hmac_secret,
+            "RECEIPT_API_URL": "http://gateway:8080/api/receipt/accept",
+            "PROVIDER_AUDIT_TOKEN": self.audit_token,
+            **self.database_secrets,
+        }
+        self.sensitive = (
+            self.jwt_secret,
+            self.hmac_secret,
+            self.capability,
+            self.audit_token,
+            self.receipt_token,
+            self.client_token,
+            self.reviewer_token,
+            *self.database_secrets.values(),
+        )
+        self.harness: ComposeHarness | None = None
+        self.environment = environment
+        self.image_ids: dict[str, str] = {}
+        self.forbidden_log_values: dict[str, str] = {
+            "provider-callback-message": "Payment completed",
+        }
 
     @staticmethod
     def _free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind(("127.0.0.1", 0))
-            return int(listener.getsockname()[1])
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
 
-    def _resolve_compose_file(self) -> Path:
-        if self.args.compose_file is not None:
-            path = self.args.compose_file.expanduser()
-            path = path if path.is_absolute() else self.repo / path
-            path = path.resolve()
-            if not path.is_file() or not _inside(path, self.repo):
-                raise FixtureError(
-                    "Selected Compose file must be inside the repository"
-                )
-            return path
-        for name in COMPOSE_NAMES:
-            path = self.repo / name
-            if path.is_file():
-                return path
-        raise ContractError("No root Compose file was found")
-
-    def _write_override(self, config: dict[str, Any] | None = None) -> None:
-        services = config.get("services", {}) if config is not None else {}
-        services = services if isinstance(services, dict) else {}
-        image_overrides: dict[str, str] = {}
-        if services:
-            built_images = {
-                str(service.get("image"))
-                for service in services.values()
-                if isinstance(service, dict)
-                and service.get("build")
-                and isinstance(service.get("image"), str)
-                and service.get("image")
-            }
-            aliases = {
-                image: f"{self.project}-image-{index}:public-check"
-                for index, image in enumerate(sorted(built_images), start=1)
-            }
-            image_overrides = {
-                name: aliases[str(service.get("image"))]
-                for name, service in services.items()
-                if name in REQUIRED_SERVICES
-                and isinstance(service, dict)
-                and str(service.get("image")) in aliases
-            }
-        self.created_image_tags = sorted(set(image_overrides.values()))
-
-        lines = ["services:"]
-        common_environment = (
-            ("COURSE_JWT_ISSUER", "moduledev-course"),
-            ("COURSE_JWT_AUDIENCE", "moduledev-api"),
-            ("COURSE_JWT_SIGNING_KEY", self.secret),
-            ("COURSE_TEST_PROFILE", "${COURSE_TEST_PROFILE:-1}"),
-        )
-        service_names = {"api", "cli", "worker-a", "worker-b", "gateway"}
-        service_names.update(
-            name
-            for name, service in services.items()
-            if isinstance(service, dict) and service.get("container_name")
-        )
-        service_names.update(image_overrides)
-        for name in sorted(service_names):
-            lines.append(f"  {name}:")
-            if name in image_overrides:
-                lines.append(f"    image: {json.dumps(image_overrides[name])}")
-            service = services.get(name)
-            if isinstance(service, dict) and service.get("container_name"):
-                lines.append("    container_name: !reset null")
-            if name in {"api", "cli", "worker-a", "worker-b"}:
-                lines.append("    environment:")
-                for key, value in common_environment:
-                    lines.append(f"      {key}: {json.dumps(value)}")
-                if name.startswith("worker-"):
-                    lines.append('      COURSE_FAILPOINT: "${COURSE_FAILPOINT:-}"')
-            if name == "gateway":
-                lines.extend(
-                    (
-                        "    ports: !override",
-                        '      - "127.0.0.1:${COURSE_GATEWAY_PORT:-8080}:8080"',
-                    )
-                )
-        if config is not None:
-            for section in ("volumes", "networks", "configs", "secrets"):
-                resources = config.get(section, {}) or {}
-                if not isinstance(resources, dict) or not resources:
-                    continue
-                lines.append(f"{section}:")
-                for index, name in enumerate(sorted(resources), start=1):
-                    lines.extend(
-                        (
-                            f"  {json.dumps(name)}:",
-                            f"    name: {self.project}-{section}-{index}",
-                        )
-                    )
-        content = "\n".join(lines) + "\n"
-        self.override.write_text(content, encoding="utf-8")
-        os.chmod(self.override, 0o600)
-
-    def record(
-        self, name: str, phase: str, passed: bool, expected: Any, actual: Any
-    ) -> None:
-        if any(item["name"] == name for item in self.checks):
-            return
+    def _record(self, name: str, phase: str, expected: Any, actual: Any) -> None:
+        passed = expected(actual) if callable(expected) else actual == expected
         self.checks.append(
             {
                 "name": name,
                 "phase": phase,
                 "status": "passed" if passed else "failed",
-                "expected": _redact(expected, (self.secret,)),
-                "actual": _redact(actual, (self.secret,)),
+                "expected": _redact(
+                    expected if not callable(expected) else "predicate", self.sensitive
+                ),
+                "actual": _redact(actual, self.sensitive),
             }
         )
+        if not passed:
+            raise ContractError(f"public check failed: {name}")
 
-    def fail_missing(self, phase: str, message: str) -> None:
-        for name in PHASE_CHECKS[phase]:
-            self.record(name, phase, False, "published contract satisfied", message)
+    def _find_compose(self) -> Path:
+        for name in COMPOSE_NAMES:
+            candidate = self.repo / name
+            if candidate.is_file():
+                return candidate
+        raise ContractError("candidate Compose file is missing")
 
-    def run_phase(self, phase: str, function: Callable[[], None]) -> None:
-        try:
-            function()
-        except ContractError as error:
-            self.fail_missing(phase, str(error))
+    def _write_override(self, config: dict[str, Any]) -> None:
+        lines = ["services:"]
+        for name in sorted(REQUIRED_SERVICES):
+            lines.extend((f"  {name}:", "    container_name: !reset null"))
+            if name == "gateway":
+                lines.append(
+                    '    ports: !override ["127.0.0.1:${COURSE_GATEWAY_PORT}:8080"]'
+                )
+            else:
+                lines.append("    ports: !reset []")
+        common_application = {
+            "COURSE_JWT_ISSUER": "${COURSE_JWT_ISSUER}",
+            "COURSE_JWT_AUDIENCE": "${COURSE_JWT_AUDIENCE}",
+            "COURSE_JWT_SIGNING_KEY": "${COURSE_JWT_SIGNING_KEY}",
+            "COURSE_TEST_PROFILE": "1",
+        }
+        environment: dict[str, dict[str, str]] = {
+            "gateway": dict(common_application),
+            "api": {
+                **common_application,
+                "PROVIDER_HMAC_SECRET": "${PROVIDER_HMAC_SECRET}",
+            },
+            "cli": dict(common_application),
+            "worker-a": dict(common_application),
+            "worker-b": dict(common_application),
+            "outbox-dispatcher": {
+                "PGAPPNAME": "week3-public-outbox-dispatcher",
+                "PGUSER": "outbox_dispatcher",
+                "PROVIDER_URL": "http://provider-simulator:8081",
+                "OUTBOX_OWNER": "outbox-dispatcher",
+                "COURSE_TEST_PROFILE": "1",
+            },
+            "receipt-adapter": {
+                "PROVIDER_CALLBACK_CAPABILITY": "${PROVIDER_CALLBACK_CAPABILITY}",
+                "PROVIDER_CALLBACK_TOKEN": "${PROVIDER_CALLBACK_TOKEN}",
+                "PROVIDER_HMAC_SECRET": "${PROVIDER_HMAC_SECRET}",
+                "RECEIPT_API_URL": "http://gateway:8080/api/receipt/accept",
+                "COURSE_TEST_PROFILE": "1",
+            },
+            "inbox-reconciler": {
+                "PGAPPNAME": "week3-public-inbox-reconciler",
+                "PGUSER": "inbox_reconciler",
+                "COURSE_TEST_PROFILE": "1",
+            },
+            "provider-simulator": {
+                "CALLBACK_URL": self.callback_base + "/${PROVIDER_CALLBACK_CAPABILITY}",
+                "SIMULATOR_MODE": "success",
+                "CALLBACK_DELAY": "200ms",
+                "CALLBACK_TIMEOUT": "1s",
+                "CALLBACK_MAX_ATTEMPTS": "5",
+                "CALLBACK_RETRY_DELAY": "200ms",
+                "AUDIT_TOKEN": "${PROVIDER_AUDIT_TOKEN}",
+            },
+        }
+        for service, values in environment.items():
+            marker = lines.index(f"  {service}:") + 1
+            insert = ["    environment:"] + [
+                f"      {key}: {json.dumps(value)}" for key, value in values.items()
+            ]
+            lines[marker:marker] = insert
+        volumes = config.get("volumes", {}) or {}
+        if volumes:
+            lines.append("volumes:")
+            for index, name in enumerate(sorted(volumes), start=1):
+                lines.extend(
+                    (
+                        f"  {name}:",
+                        "    external: false",
+                        f"    name: {self.project}-volume-{index}",
+                    )
+                )
+        networks = config.get("networks", {}) or {}
+        if networks:
+            lines.append("networks:")
+            for index, name in enumerate(sorted(networks), start=1):
+                lines.extend(
+                    (
+                        f"  {name}:",
+                        "    external: false",
+                        f"    name: {self.project}-network-{index}",
+                    )
+                )
+        self.override.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _payload(self, name: str) -> dict[str, Any]:
+        relative = self.fixture["files"][name]
+        value = json.loads((self.fixtures / relative).read_text(encoding="utf-8"))
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def h(self) -> ComposeHarness:
+        if self.harness is None:
+            raise RuntimeError("Compose harness is not initialized")
+        return self.harness
+
+    def _poll_rows(
+        self,
+        query: str,
+        predicate: Callable[[list[dict[str, Any]]], bool],
+        *,
+        timeout: float = 60,
+    ) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + timeout
+        rows: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            rows = self.h.psql_rows(query)
+            if predicate(rows):
+                return rows
+            time.sleep(0.2)
+        raise ContractError("timed out waiting for candidate evidence")
 
     @staticmethod
-    def _command_view(
-        result: CommandResult, body: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        return {
-            "exitCode": result.returncode,
-            "timedOut": result.timed_out,
-            "status": body.get("status") if isinstance(body, dict) else None,
-            "code": body.get("code") if isinstance(body, dict) else None,
-        }
-
-    def _tracked_paths(self) -> list[str]:
-        result = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=self.repo,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode == 0:
-            return [item for item in result.stdout.split("\0") if item]
-        return [
-            path.relative_to(self.repo).as_posix()
-            for path in self.repo.rglob("*")
-            if path.is_file() and ".git" not in path.parts
-        ]
-
-    def _admission_text_findings(self) -> list[str]:
-        findings: list[str] = []
+    def _uuid(value: Any, field: str) -> str:
+        if not isinstance(value, str):
+            raise ContractError(f"{field} is missing")
         try:
-            text = (self.repo / "README.md").read_text(encoding="utf-8")
-        except OSError:
-            return ["missing README.md"]
-        headings = {
-            item.strip().casefold()
-            for item in re.findall(r"(?mi)^#{2,4}[ \t]+(.+?)[ \t]*$", text)
-        }
-        findings.extend(
-            f"missing README section {name}"
-            for name in sorted(SOLUTION_HEADINGS - headings)
-        )
-        findings.extend(
-            f"missing README value {value}"
-            for value in README_LITERALS
-            if value not in text
-        )
-        tracked = self._tracked_paths()
-        if ".gitignore" not in tracked:
-            findings.append("missing .gitignore")
-        for item in tracked:
-            path = Path(item)
-            parts = {part.casefold() for part in path.parts}
-            name = path.name.casefold()
-            if parts.intersection({"bin", "obj", ".vs", ".idea", "__pycache__"}):
-                findings.append(f"tracked generated directory {item}")
-            elif name == ".env" or (
-                name.startswith(".env.") and name != ".env.example"
-            ):
-                findings.append(f"tracked environment file {item}")
-            elif name == "week-2-public-report.json" or name.endswith(".log"):
-                findings.append(f"tracked generated artifact {item}")
-        return findings
+            return str(uuid.UUID(value))
+        except ValueError as error:
+            raise ContractError(f"{field} is not a UUID") from error
 
-    def admission(self) -> bool:
-        self.record(
-            "fixture-integrity",
-            "admission",
-            True,
-            self.fixture["digest"],
-            canonical_fixture_digest(self.fixtures),
+    @staticmethod
+    def _text_id(value: Any, field: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 128
+            or "\r" in value
+            or "\n" in value
+        ):
+            raise ContractError(f"{field} is invalid")
+        return value
+
+    @staticmethod
+    def _sql_text(value: str) -> str:
+        encoded = value.encode("utf-8").hex()
+        return f"convert_from(decode('{encoded}', 'hex'), 'UTF8')"
+
+    def _create_and_submit(self, payload_name: str, label: str) -> tuple[str, str]:
+        payload = self._payload(payload_name)
+        self.forbidden_log_values[f"{label}-request-body"] = receipt_bytes(
+            payload
+        ).decode("utf-8")
+        request = self.h.action(
+            "payment",
+            "request",
+            payload,
+            self.client_token,
+            idempotency_key=f"public-request-{label}-{secrets.token_hex(4)}",
         )
-        text_findings = self._admission_text_findings()
-        self.record(
-            "repository-contract",
-            "admission",
-            not text_findings,
-            "README sections, launch/check commands and clean tracked artifacts",
-            text_findings,
+        request_json = request.json()
+        if (
+            request.status != 200
+            or request_json is None
+            or request_json.get("status") != "ok"
+        ):
+            raise ContractError(f"payment.request failed for {label}")
+        operation_id = self._uuid(
+            request_json.get("result", {}).get("operationId"), "operationId"
         )
-        raw_compose_findings = _raw_compose_findings(self.compose_file)
-        if raw_compose_findings:
-            self.record(
-                "compose-safety",
-                "admission",
-                False,
-                "self-contained Compose model",
-                raw_compose_findings,
-            )
-            return False
-        config_result = self.harness.compose_candidate(
-            ["config", "--format", "json", "--no-env-resolution"], timeout=60
+        submit = self.h.action(
+            "payment",
+            "submit",
+            {"operationId": operation_id},
+            self.client_token,
+            idempotency_key=f"public-submit-{label}-{secrets.token_hex(4)}",
         )
+        submit_json = submit.json()
+        if (
+            submit.status != 200
+            or submit_json is None
+            or submit_json.get("status") != "ok"
+        ):
+            raise ContractError(f"payment.submit failed for {label}")
+        process_id = self._uuid(
+            submit_json.get("result", {}).get("processId"), "processId"
+        )
+        return operation_id, process_id
+
+    def _operation(self, operation_id: str) -> list[dict[str, Any]]:
+        return self.h.psql_rows(
+            "SELECT operation_id, operation_kind, status, process_id "
+            "FROM autocheck.operations "
+            f"WHERE operation_id = '{operation_id}'::uuid"
+        )
+
+    def _wait_operation(self, operation_id: str, status: str) -> list[dict[str, Any]]:
+        return self._poll_rows(
+            "SELECT operation_id, operation_kind, status, process_id "
+            "FROM autocheck.operations "
+            f"WHERE operation_id = '{operation_id}'::uuid",
+            lambda rows: len(rows) == 1 and rows[0].get("status") == status,
+        )
+
+    def _external_request(self, operation_id: str) -> list[dict[str, Any]]:
+        return self._poll_rows(
+            "SELECT external_request_id, operation_id, state, payload_hash "
+            "FROM autocheck.external_requests "
+            f"WHERE operation_id = '{operation_id}'::uuid",
+            lambda rows: len(rows) == 1,
+        )
+
+    def _provider_audit(self, external_request_id: str) -> HttpResult:
+        quoted = urllib.parse.quote(external_request_id, safe="")
+        return self.h.internal_http(
+            "receipt-adapter",
+            "GET",
+            f"http://provider-simulator:8081/internal/audit/{quoted}",
+            headers={"X-Audit-Token": self.audit_token},
+        )
+
+    def _check_admission_and_start(self) -> None:
+        self.fixture = load_fixture(self.fixtures)
+        compose_file = self._find_compose()
+        if not self.wrapper.is_file():
+            raise EnvironmentFailure("trusted Compose wrapper is missing")
+        self.harness = ComposeHarness(
+            repo=self.repo,
+            compose_file=compose_file,
+            override_file=self.override,
+            wrapper=self.wrapper,
+            project=self.project,
+            gateway_port=self.gateway_port,
+            environment=self.environment,
+            sensitive=self.sensitive,
+        )
+        docker_probe = self.h.run(
+            ("docker", "info", "--format", "{{.ServerVersion}}"), timeout=15
+        )
+        if not docker_probe.ok:
+            raise EnvironmentFailure("Docker daemon is unavailable")
+        config_result = self.h.candidate_config()
         if not config_result.ok:
-            if self.harness._environment_error(config_result):
-                raise EnvironmentFailure(
-                    "Docker Compose is unavailable during admission"
-                )
-            self.record(
-                "compose-contract",
-                "admission",
-                False,
-                sorted(REQUIRED_SERVICES),
-                {"exitCode": config_result.returncode},
+            self.h.require_docker_result(
+                config_result, "candidate Compose config is invalid"
             )
-            return False
         try:
             config = json.loads(config_result.stdout)
-        except json.JSONDecodeError:
-            self.record(
-                "compose-contract",
-                "admission",
-                False,
-                "valid Compose JSON",
-                "invalid output",
+        except json.JSONDecodeError as error:
+            raise ContractError("candidate Compose config is not JSON") from error
+        findings = _compose_contract_findings(config, self.repo)
+        findings.extend(
+            _secret_distribution_findings(
+                config,
+                {
+                    "jwt-signing-key": (
+                        self.jwt_secret,
+                        {
+                            (service, "COURSE_JWT_SIGNING_KEY")
+                            for service in CSHARP_SERVICES + ("cli",)
+                        },
+                    ),
+                    "provider-hmac-secret": (
+                        self.hmac_secret,
+                        {
+                            ("api", "PROVIDER_HMAC_SECRET"),
+                            ("receipt-adapter", "PROVIDER_HMAC_SECRET"),
+                        },
+                    ),
+                    "callback-capability": (
+                        self.capability,
+                        {
+                            ("receipt-adapter", "PROVIDER_CALLBACK_CAPABILITY"),
+                            ("provider-simulator", "CALLBACK_URL"),
+                        },
+                    ),
+                    "callback-token": (
+                        self.receipt_token,
+                        {("receipt-adapter", "PROVIDER_CALLBACK_TOKEN")},
+                    ),
+                    "provider-audit-token": (
+                        self.audit_token,
+                        {("provider-simulator", "AUDIT_TOKEN")},
+                    ),
+                    "postgres-password": (
+                        self.database_secrets["COURSE_POSTGRES_PASSWORD"],
+                        {("postgres", "*")},
+                    ),
+                    "migrator-password": (
+                        self.database_secrets["COURSE_MIGRATOR_PASSWORD"],
+                        {("postgres", "*"), ("cli", "*")},
+                    ),
+                    "publisher-password": (
+                        self.database_secrets["COURSE_PUBLISHER_PASSWORD"],
+                        {("postgres", "*"), ("cli", "*")},
+                    ),
+                    "runtime-password": (
+                        self.database_secrets["COURSE_RUNTIME_PASSWORD"],
+                        {("postgres", "*"), ("api", "*")},
+                    ),
+                    "worker-password": (
+                        self.database_secrets["COURSE_WORKER_PASSWORD"],
+                        {("postgres", "*"), ("worker-a", "*"), ("worker-b", "*")},
+                    ),
+                    "outbox-password": (
+                        self.database_secrets["COURSE_OUTBOX_PASSWORD"],
+                        {("postgres", "*"), ("outbox-dispatcher", "*")},
+                    ),
+                    "inbox-password": (
+                        self.database_secrets["COURSE_INBOX_PASSWORD"],
+                        {("postgres", "*"), ("inbox-reconciler", "*")},
+                    ),
+                },
             )
-            return False
-        services = config.get("services") if isinstance(config, dict) else None
-        services = services if isinstance(services, dict) else {}
-        gateway_ports = _published_ports(services.get("gateway"))
-        other_ports = {
-            name: sorted(_published_ports(service))
-            for name, service in services.items()
-            if name != "gateway" and _published_ports(service)
-        }
-        missing = sorted(REQUIRED_SERVICES - set(services))
-        compose_ok = not missing and gateway_ports == {8080} and not other_ports
-        self.record(
-            "compose-contract",
-            "admission",
-            compose_ok,
-            {
-                "services": sorted(REQUIRED_SERVICES),
-                "gatewayPorts": [8080],
-                "otherPorts": {},
-            },
-            {
-                "missingServices": missing,
-                "gatewayPorts": sorted(gateway_ports),
-                "otherPorts": other_ports,
-            },
         )
-        unsafe = _unsafe_compose_findings(config, self.repo)
-        self.record(
-            "compose-safety", "admission", not unsafe, "no host escape options", unsafe
-        )
-        worker_a = services.get("worker-a", {})
-        worker_b = services.get("worker-b", {})
-        image_a = worker_a.get("image") if isinstance(worker_a, dict) else None
-        image_b = worker_b.get("image") if isinstance(worker_b, dict) else None
-        worker_declared = (
-            isinstance(image_a, str) and bool(image_a) and image_a == image_b
-        )
-        self.record(
-            "worker-image-contract",
-            "admission",
-            worker_declared,
-            "worker-a and worker-b declare one shared image",
-            {"sameDeclaredImage": worker_declared},
-        )
-        api_dotnet = _dotnet_build_declared(services.get("api"), self.repo)
-        worker_dotnet = _dotnet_build_declared(
-            worker_a, self.repo
-        ) or _dotnet_build_declared(worker_b, self.repo)
-        self.record(
-            "dotnet-runtime-contract",
-            "admission",
-            api_dotnet and worker_dotnet,
-            "api and shared worker are built as .NET runtimes",
-            {"apiDotnet": api_dotnet, "workerDotnet": worker_dotnet},
-        )
-        if (
-            not compose_ok
-            or unsafe
-            or not worker_declared
-            or not api_dotnet
-            or not worker_dotnet
-        ):
-            return False
-
+        self._record("compose-contract", "admission", [], findings)
+        self.callback_base = _provider_callback_base(config)
         self._write_override(config)
+        runtime_config_result = self.h.runtime_config()
+        if not runtime_config_result.ok:
+            self.h.require_docker_result(
+                runtime_config_result, "effective Compose config is invalid"
+            )
+        try:
+            runtime_config = json.loads(runtime_config_result.stdout)
+        except json.JSONDecodeError as error:
+            raise ContractError("effective Compose config is not JSON") from error
+        self._record(
+            "runtime-compose-contract",
+            "admission",
+            [],
+            _runtime_compose_findings(runtime_config, self.gateway_port),
+        )
         self.cleanup_armed = True
+        pull = self.h.run(("docker", "pull", PROVIDER_IMAGE), timeout=180)
+        if not pull.ok:
+            raise EnvironmentFailure("provider image pull failed")
+        build = self.h.compose(("build", "--pull", "--no-cache"), timeout=1800)
+        if not build.ok:
+            self.h.require_docker_result(build, "candidate images did not build")
+        services = config["services"]
+        python_image = str(services[PYTHON_SERVICES[0]]["image"])
+        built_python_id = self.h.local_image_id(python_image)
+        up = self.h.compose(("up", "-d", "--no-build"), timeout=600)
+        if not up.ok:
+            self.h.require_docker_result(up, "candidate stack did not start")
+        self.h.wait_gateway()
+        for service in RUNNING_SERVICES:
+            self.h.container_id(service)
+        python_ids = {self.h.image_id(service) for service in PYTHON_SERVICES}
+        self._record("python-single-image", "admission", 1, len(python_ids))
+        self._record(
+            "python-locally-built-image",
+            "admission",
+            {built_python_id},
+            python_ids,
+        )
+        for service in PYTHON_SERVICES:
+            version = self.h.detect_python_runtime(service)
+            self._record(
+                f"python-version-{service}",
+                "admission",
+                lambda value: tuple(int(part) for part in value.split("."))
+                >= (3, 12, 0),
+                ".".join(str(part) for part in version),
+            )
+        self.image_ids = {
+            service: self.h.image_id(service)
+            for service in (*PYTHON_SERVICES, "api", "worker-a", "worker-b")
+        }
 
-        down = self.harness.compose(
-            ["down", "--volumes", "--remove-orphans"], timeout=90
+    def _check_database_contract(self) -> None:
+        columns = self.h.psql_rows(
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'autocheck'"
         )
-        self.harness.require(down, "Cannot initialize an empty Compose project")
-        build = self.harness.compose(
-            [
-                "build",
-                "--pull",
-                "--no-cache",
-                *sorted(REQUIRED_SERVICES),
-            ],
-            timeout=self.args.build_timeout,
+        names = {row.get("table_name") for row in columns}
+        self._record("week3-stable-views", "startup", True, REQUIRED_VIEWS <= names)
+        actual_columns: dict[str, set[Any]] = {}
+        for row in columns:
+            actual_columns.setdefault(str(row.get("table_name")), set()).add(
+                row.get("column_name")
+            )
+        self._record(
+            "week3-stable-view-columns",
+            "startup",
+            True,
+            all(
+                required <= actual_columns.get(view, set())
+                for view, required in REQUIRED_VIEW_COLUMNS.items()
+            ),
         )
-        build_ok = build.ok
-        if not build_ok and self.harness._environment_error(build):
-            raise EnvironmentFailure("Docker transport failed during the cold build")
-        self.record(
-            "cold-build",
-            "admission",
-            build_ok,
-            "docker compose build --pull --no-cache succeeds",
-            {"exitCode": build.returncode},
+        relation_kinds = self.h.psql_rows(
+            "SELECT c.relname AS table_name, c.relkind "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'autocheck'"
         )
-        if not build_ok:
-            return False
-        digest_after_build = canonical_fixture_digest(self.fixtures)
-        self.record(
-            "fixture-post-build-integrity",
-            "admission",
-            digest_after_build == self.fixture_digest,
-            self.fixture_digest,
-            digest_after_build,
+        required_relations = {
+            row.get("table_name"): row.get("relkind")
+            for row in relation_kinds
+            if row.get("table_name") in REQUIRED_VIEWS
+        }
+        self._record(
+            "week3-stable-relations-are-views",
+            "startup",
+            {view: "v" for view in REQUIRED_VIEWS},
+            required_relations,
         )
-        if digest_after_build != self.fixture_digest:
-            return False
-        api_image = self.harness.image_id("api")
-        worker_a_image = self.harness.image_id("worker-a")
-        worker_b_image = self.harness.image_id("worker-b")
-        shared = worker_a_image == worker_b_image
-        self.record(
-            "built-image-contract",
-            "admission",
-            shared,
-            "worker-a and worker-b use one image ID",
-            {"api": api_image, "worker": worker_a_image, "workersMatch": shared},
+        invalid_types = sorted(
+            f"{row.get('table_name')}.{row.get('column_name')}:{row.get('data_type')}"
+            for row in columns
+            if row.get("table_name") in REQUIRED_VIEW_COLUMNS
+            and row.get("column_name")
+            in REQUIRED_VIEW_COLUMNS[str(row.get("table_name"))]
+            and row.get("data_type")
+            != _expected_column_type(str(row.get("column_name")))
         )
-        if not shared:
-            return False
-        self.baseline_images = {"api": api_image, "worker": worker_a_image}
-        up = self.harness.compose(
-            [
+        self._record("week3-stable-view-types", "startup", [], invalid_types)
+        contract_info = self.h.psql_rows(
+            "SELECT contract_version, generated_at FROM autocheck.contract_info"
+        )
+        self._record(
+            "week3-contract-info",
+            "startup",
+            True,
+            len(contract_info) == 1
+            and contract_info[0].get("contract_version") == "course-1"
+            and contract_info[0].get("generated_at") is not None,
+        )
+        flows = self.h.psql_rows(
+            "SELECT flow_name, flow_version, status, is_active "
+            "FROM autocheck.flow_versions "
+            "WHERE flow_name IN ('payment-processing', 'payment-review')"
+        )
+        active = {
+            (row.get("flow_name"), row.get("flow_version"))
+            for row in flows
+            if row.get("status") == "PUBLISHED" and row.get("is_active") is True
+        }
+        self._record(
+            "payment-flows-active",
+            "startup",
+            {("payment-processing", 1), ("payment-review", 1)},
+            active,
+        )
+        roles = self.h.psql_rows(
+            "SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, "
+            "rolbypassrls FROM pg_catalog.pg_roles "
+            "WHERE rolname IN ('outbox_dispatcher', 'inbox_reconciler')"
+        )
+        elevated_flags = (
+            "rolsuper",
+            "rolcreaterole",
+            "rolcreatedb",
+            "rolreplication",
+            "rolbypassrls",
+        )
+        self._record(
+            "python-database-roles",
+            "security",
+            True,
+            len(roles) == 2
+            and all(not any(row.get(flag) for flag in elevated_flags) for row in roles),
+        )
+        memberships = self.h.psql_rows(
+            "SELECT member.rolname AS member_role, granted.rolname AS granted_role "
+            "FROM pg_catalog.pg_auth_members membership "
+            "JOIN pg_catalog.pg_roles member ON member.oid = membership.member "
+            "JOIN pg_catalog.pg_roles granted ON granted.oid = membership.roleid "
+            "WHERE member.rolname IN ('outbox_dispatcher', 'inbox_reconciler')"
+        )
+        self._record("python-roles-no-memberships", "security", [], memberships)
+        dml = self.h.psql_rows(
+            "SELECT r.role_name, n.nspname AS schema_name, c.relname AS relation_name "
+            "FROM (VALUES ('outbox_dispatcher'), ('inbox_reconciler')) AS r(role_name) "
+            "CROSS JOIN pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') "
+            "AND n.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND n.nspname NOT LIKE 'pg_toast%' "
+            "AND (has_table_privilege(r.role_name, c.oid, 'SELECT') "
+            "OR has_table_privilege(r.role_name, c.oid, 'INSERT') "
+            "OR has_table_privilege(r.role_name, c.oid, 'UPDATE') "
+            "OR has_table_privilege(r.role_name, c.oid, 'DELETE') "
+            "OR has_table_privilege(r.role_name, c.oid, 'TRUNCATE') "
+            "OR has_table_privilege(r.role_name, c.oid, 'REFERENCES') "
+            "OR has_table_privilege(r.role_name, c.oid, 'TRIGGER'))"
+        )
+        self._record("python-roles-no-table-privileges", "security", [], dml)
+        create_privileges = self.h.psql_rows(
+            "SELECT r.role_name, n.nspname AS schema_name "
+            "FROM (VALUES ('outbox_dispatcher'), ('inbox_reconciler')) AS r(role_name) "
+            "CROSS JOIN pg_catalog.pg_namespace n "
+            "WHERE n.nspname NOT LIKE 'pg_%' "
+            "AND n.nspname <> 'information_schema' "
+            "AND has_schema_privilege(r.role_name, n.oid, 'CREATE')"
+        )
+        self._record("python-roles-no-schema-create", "security", [], create_privileges)
+        database_create = self.h.psql_rows(
+            "SELECT r.role_name "
+            "FROM (VALUES ('outbox_dispatcher'), ('inbox_reconciler')) AS r(role_name) "
+            "WHERE has_database_privilege(r.role_name, current_database(), 'CREATE')"
+        )
+        self._record("python-roles-no-database-create", "security", [], database_create)
+        functions = self.h.psql_rows(
+            "SELECT p.proname AS function_name, "
+            "pg_catalog.oidvectortypes(p.proargtypes) AS argument_types "
+            "FROM pg_catalog.pg_proc p "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'delivery' "
+            "AND p.proname IN ('claim_outbox', 'succeed_outbox', 'fail_outbox', "
+            "'reconcile_inbox')"
+        )
+        signatures = {
+            (row.get("function_name"), row.get("argument_types")) for row in functions
+        }
+        self._record(
+            "python-fixed-sql-boundaries",
+            "startup",
+            {
+                ("claim_outbox", "text, integer"),
+                ("succeed_outbox", "uuid, text, bigint, text"),
+                ("fail_outbox", "uuid, text, bigint, text"),
+                ("reconcile_inbox", "integer"),
+            },
+            signatures,
+        )
+        function_privileges = self.h.psql_rows(
+            "SELECT r.role_name, n.nspname AS schema_name, "
+            "p.proname AS function_name, "
+            "pg_catalog.oidvectortypes(p.proargtypes) AS argument_types "
+            "FROM (VALUES ('outbox_dispatcher'), ('inbox_reconciler')) AS r(role_name) "
+            "CROSS JOIN pg_catalog.pg_proc p "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname NOT LIKE 'pg_%' "
+            "AND n.nspname <> 'information_schema' "
+            "AND has_function_privilege(r.role_name, p.oid, 'EXECUTE')"
+        )
+        actual_privileges = {
+            (
+                row.get("role_name"),
+                row.get("schema_name"),
+                row.get("function_name"),
+                row.get("argument_types"),
+            )
+            for row in function_privileges
+        }
+        self._record(
+            "python-fixed-function-privileges",
+            "security",
+            {
+                ("outbox_dispatcher", "delivery", "claim_outbox", "text, integer"),
+                (
+                    "outbox_dispatcher",
+                    "delivery",
+                    "succeed_outbox",
+                    "uuid, text, bigint, text",
+                ),
+                (
+                    "outbox_dispatcher",
+                    "delivery",
+                    "fail_outbox",
+                    "uuid, text, bigint, text",
+                ),
+                ("inbox_reconciler", "delivery", "reconcile_inbox", "integer"),
+            },
+            actual_privileges,
+        )
+
+    def _check_provider_path(self) -> tuple[str, str]:
+        stop = self.h.compose(("stop", "outbox-dispatcher"), timeout=30)
+        self.h.require_docker_result(stop, "cannot stop outbox-dispatcher")
+        operation_id, process_id = self._create_and_submit(
+            "providerRequest", "provider"
+        )
+        external_rows = self._external_request(operation_id)
+        self._record("one-external-request", "outbox", 1, len(external_rows))
+        external_id = self._text_id(
+            external_rows[0].get("external_request_id"), "externalRequestId"
+        )
+        external_sql = self._sql_text(external_id)
+        outbox = self.h.psql_rows(
+            "SELECT outbox_id, external_request_id, state, attempt_count "
+            "FROM autocheck.outbox "
+            f"WHERE external_request_id = {external_sql}"
+        )
+        self._record(
+            "dispatcher-stop-durable-outbox",
+            "outbox",
+            True,
+            len(outbox) == 1 and outbox[0].get("state") in {"PENDING", "RETRY_WAIT"},
+        )
+        audit_before = self._provider_audit(external_id)
+        self._record(
+            "provider-not-called-before-dispatch", "outbox", 404, audit_before.status
+        )
+        missing_message_id = f"missing-{secrets.token_hex(6)}"
+        message_id = f"invalid-{secrets.token_hex(6)}"
+        invalid_receipt = {
+            "externalRequestId": external_id,
+            "messageId": message_id,
+            "occurredAt": "2026-09-04T12:00:00Z",
+            "outcome": "COMPLETED",
+            "providerPaymentId": "invalid-provider",
+            "version": 1,
+        }
+        missing_receipt = dict(invalid_receipt)
+        missing_receipt["messageId"] = missing_message_id
+        missing_receipt["providerPaymentId"] = missing_message_id
+        missing = self.h.action(
+            "receipt",
+            "accept",
+            missing_receipt,
+            self.receipt_token,
+            idempotency_key=missing_message_id,
+        )
+        missing_json = missing.json()
+        self._record(
+            "missing-signature-rejected",
+            "receipt",
+            True,
+            missing.status == 403
+            and missing_json is not None
+            and missing_json.get("code") == "receipt.signature_required",
+        )
+        invalid = self.h.action(
+            "receipt",
+            "accept",
+            invalid_receipt,
+            self.receipt_token,
+            idempotency_key=message_id,
+            extra_headers={"X-Provider-Signature": "v1=" + "00" * 32},
+        )
+        invalid_json = invalid.json()
+        self._record(
+            "invalid-signature-rejected",
+            "receipt",
+            True,
+            invalid.status == 401
+            and invalid_json is not None
+            and invalid_json.get("code") == "signature.invalid",
+        )
+        invalid_rows = self.h.psql_rows(
+            "SELECT message_id FROM autocheck.inbox "
+            f"WHERE message_id IN ({self._sql_text(missing_message_id)}, "
+            f"{self._sql_text(message_id)})"
+        )
+        self._record("invalid-signatures-no-inbox", "receipt", [], invalid_rows)
+        start = self.h.compose(
+            ("up", "-d", "--no-build", "outbox-dispatcher"), timeout=30
+        )
+        self.h.require_docker_result(start, "cannot start outbox-dispatcher")
+        completed = self._wait_operation(operation_id, "COMPLETED")
+        self._record(
+            "provider-success-completes-operation",
+            "outbox",
+            True,
+            len(completed) == 1
+            and completed[0].get("status") == "COMPLETED"
+            and completed[0].get("process_id") == process_id,
+        )
+        stable_external = self.h.psql_rows(
+            "SELECT external_request_id FROM autocheck.external_requests "
+            f"WHERE operation_id = '{operation_id}'::uuid"
+        )
+        self._record(
+            "one-external-request-after-completion", "outbox", 1, len(stable_external)
+        )
+        audit = self._provider_audit(external_id)
+        audit_json = audit.json()
+        self._record(
+            "provider-single-payment",
+            "outbox",
+            True,
+            audit.status == 200
+            and audit_json is not None
+            and audit_json.get("operationId") == external_id
+            and audit_json.get("idempotencyKey") == external_id
+            and isinstance(audit_json.get("requestCount"), int)
+            and audit_json.get("requestCount", 0) >= 1
+            and audit_json.get("paymentCount") == 1,
+        )
+        evidence = self.h.psql_rows(
+            "SELECT r.message_id, r.message_version, r.outcome, r.signature_valid, "
+            "r.body_hash AS receipt_body_hash, i.body_hash AS inbox_body_hash, "
+            "i.state AS inbox_state "
+            "FROM autocheck.receipts r "
+            "JOIN autocheck.inbox i ON i.message_id = r.message_id "
+            f"WHERE r.external_request_id = {external_sql}"
+        )
+        self._record(
+            "signed-receipt-evidence",
+            "receipt",
+            True,
+            len(evidence) == 1
+            and evidence[0].get("message_version") == 1
+            and evidence[0].get("outcome") == "COMPLETED"
+            and evidence[0].get("signature_valid") is True
+            and bool(evidence[0].get("receipt_body_hash"))
+            and evidence[0].get("receipt_body_hash")
+            == evidence[0].get("inbox_body_hash")
+            and evidence[0].get("inbox_state") == "APPLIED",
+        )
+        provider_payment_id = self._text_id(
+            audit_json.get("providerPaymentId") if audit_json else None,
+            "providerPaymentId",
+        )
+        receipt_message_id = self._text_id(
+            evidence[0].get("message_id") if len(evidence) == 1 else None,
+            "messageId",
+        )
+        self._record(
+            "provider-receipt-identity",
+            "receipt",
+            provider_payment_id,
+            receipt_message_id,
+        )
+        events = self.h.action(
+            "operation",
+            "events",
+            {"operationId": operation_id},
+            self.client_token,
+            idempotency_key=f"public-events-{secrets.token_hex(5)}",
+        )
+        self._record("operation-events-action", "receipt", 200, events.status)
+        return operation_id, process_id
+
+    def _check_adapter_deduplication(self) -> tuple[str, str]:
+        stopped = self.h.compose(("stop", "outbox-dispatcher"), timeout=30)
+        self.h.require_docker_result(
+            stopped, "cannot stop outbox-dispatcher for adapter scenario"
+        )
+        operation_id, process_id = self._create_and_submit("adapterRequest", "adapter")
+        external_rows = self._external_request(operation_id)
+        self._record("one-external-request-adapter", "receipt", 1, len(external_rows))
+        external_id = self._text_id(
+            external_rows[0].get("external_request_id"), "externalRequestId"
+        )
+        legacy = {
+            "providerPaymentId": f"public-provider-{secrets.token_hex(5)}",
+            "operationId": external_id,
+            "result": "REJECTED",
+            "message": "Public deterministic rejection",
+            "occurredAt": "2026-09-04T12:00:00.123Z",
+        }
+        self.forbidden_log_values["adapter-callback-message"] = legacy["message"]
+        self.forbidden_log_values["adapter-callback-body"] = receipt_bytes(
+            legacy
+        ).decode("utf-8")
+        callback_url = self.callback_base + "/" + self.capability
+        wrong_legacy = dict(legacy)
+        wrong_message_id = f"wrong-capability-{secrets.token_hex(5)}"
+        wrong_legacy["providerPaymentId"] = wrong_message_id
+        wrong = self.h.internal_http(
+            "receipt-adapter",
+            "POST",
+            self.callback_base + "/wrong",
+            body=wrong_legacy,
+            headers={"Content-Type": "application/json"},
+        )
+        self._record("wrong-capability-rejected", "receipt", 404, wrong.status)
+        wrong_rows = self.h.psql_rows(
+            "SELECT message_id FROM autocheck.inbox "
+            f"WHERE message_id = {self._sql_text(wrong_message_id)}"
+        )
+        self._record("wrong-capability-no-inbox", "receipt", [], wrong_rows)
+        first = self.h.internal_http(
+            "receipt-adapter",
+            "POST",
+            callback_url,
+            body=legacy,
+            headers={"Content-Type": "application/json"},
+        )
+        duplicate = self.h.internal_http(
+            "receipt-adapter",
+            "POST",
+            callback_url,
+            body=legacy,
+            headers={"Content-Type": "application/json"},
+        )
+        conflicting = dict(legacy)
+        conflicting["result"] = "COMPLETED"
+        conflicting["message"] = "Conflicting completion"
+        self.forbidden_log_values["adapter-conflict-message"] = conflicting["message"]
+        conflict = self.h.internal_http(
+            "receipt-adapter",
+            "POST",
+            callback_url,
+            body=conflicting,
+            headers={"Content-Type": "application/json"},
+        )
+        first_json = first.json()
+        duplicate_json = duplicate.json()
+        self._record(
+            "adapter-first-and-duplicate",
+            "receipt",
+            True,
+            200 <= first.status < 300
+            and duplicate.status == first.status
+            and first_json is not None
+            and same_action_result(first_json, duplicate_json),
+        )
+        conflict_json = conflict.json()
+        self._record(
+            "adapter-conflicting-callback",
+            "receipt",
+            True,
+            conflict.status == 409
+            and conflict_json is not None
+            and conflict_json.get("code") == "idempotency.conflict",
+        )
+        rejected = self._wait_operation(operation_id, "REJECTED")
+        self._record(
+            "adapter-rejected-branch",
+            "receipt",
+            True,
+            len(rejected) == 1
+            and rejected[0].get("status") == "REJECTED"
+            and rejected[0].get("process_id") == process_id,
+        )
+        message_id = legacy["providerPaymentId"]
+        rows = self.h.psql_rows(
+            "SELECT i.message_id, i.state, i.body_hash AS inbox_body_hash, "
+            "r.outcome, r.external_request_id, r.message_version, "
+            "r.signature_valid, r.body_hash AS receipt_body_hash "
+            "FROM autocheck.inbox i JOIN autocheck.receipts r USING (message_id) "
+            f"WHERE i.message_id = {self._sql_text(message_id)}"
+        )
+        expected_body_hash = hashlib.sha256(
+            receipt_bytes(normalized_receipt(legacy))
+        ).hexdigest()
+        self._record(
+            "adapter-one-inbox-receipt",
+            "receipt",
+            True,
+            len(rows) == 1
+            and rows[0].get("state") == "APPLIED"
+            and rows[0].get("outcome") == "REJECTED",
+        )
+        self._record(
+            "adapter-exact-signed-body",
+            "receipt",
+            True,
+            len(rows) == 1
+            and rows[0].get("message_version") == 1
+            and rows[0].get("signature_valid") is True
+            and rows[0].get("receipt_body_hash") == expected_body_hash
+            and rows[0].get("inbox_body_hash") == expected_body_hash,
+        )
+        started = self.h.compose(
+            ("up", "-d", "--no-build", "outbox-dispatcher"), timeout=30
+        )
+        self.h.require_docker_result(
+            started, "cannot restart outbox-dispatcher after adapter scenario"
+        )
+        sentinel_operation, _ = self._create_and_submit(
+            "providerRequest", "dispatcher-sentinel"
+        )
+        self._wait_operation(sentinel_operation, "COMPLETED")
+        sentinel_external = self._external_request(sentinel_operation)
+        sentinel_id = self._text_id(
+            sentinel_external[0].get("external_request_id"), "externalRequestId"
+        )
+        sentinel_audit = self._provider_audit(sentinel_id)
+        self._record(
+            "dispatcher-resumed-after-confirmation",
+            "receipt",
+            200,
+            sentinel_audit.status,
+        )
+        audit = self._provider_audit(external_id)
+        self._record("confirmed-outbox-not-redelivered", "receipt", 404, audit.status)
+        return operation_id, process_id
+
+    def _check_review(self) -> tuple[str, str]:
+        auto_operation, auto_process = self._create_and_submit(
+            "reviewAutoRequest", "review-auto"
+        )
+        auto = self._wait_operation(auto_operation, "COMPLETED")
+        decision = self.h.psql_rows(
+            "SELECT source, outcome, rule_version FROM autocheck.decisions "
+            f"WHERE process_id = '{auto_process}'::uuid"
+        )
+        self._record(
+            "review-limit-rule",
+            "review",
+            True,
+            len(auto) == 1
+            and auto[0].get("status") == "COMPLETED"
+            and len(decision) == 1
+            and decision[0].get("source") == "LIMIT_RULE"
+            and decision[0].get("rule_version") == "course-limit-v1"
+            and decision[0].get("outcome") == "APPROVED",
+        )
+        manual_operation, manual_process = self._create_and_submit(
+            "reviewManualRequest", "review-manual"
+        )
+        process_rows = self._poll_rows(
+            "SELECT process_id, state, current_step_key FROM autocheck.processes "
+            f"WHERE process_id = '{manual_process}'::uuid",
+            lambda rows: len(rows) == 1 and rows[0].get("state") == "WAITING_MANUAL",
+        )
+        self._record(
+            "review-waits-manual",
+            "review",
+            True,
+            len(process_rows) == 1 and process_rows[0].get("state") == "WAITING_MANUAL",
+        )
+        steps = self.h.psql_rows(
+            "SELECT step_instance_id, step_type, state FROM autocheck.steps "
+            f"WHERE process_id = '{manual_process}'::uuid "
+            "AND step_type = 'MANUAL' AND state = 'WAITING'"
+        )
+        if len(steps) != 1:
+            raise ContractError("manual step projection is invalid")
+        step_id = self._uuid(steps[0].get("step_instance_id"), "stepInstanceId")
+        payload = {
+            "processId": manual_process,
+            "stepInstanceId": step_id,
+            "decision": "APPROVED",
+            "reason": "Public checker approval",
+        }
+        self.forbidden_log_values["manual-reason"] = payload["reason"]
+        key = f"public-manual-{secrets.token_hex(5)}"
+        accepted = self.h.action(
+            "workflow",
+            "manual",
+            payload,
+            self.reviewer_token,
+            idempotency_key=key,
+        )
+        repeated = self.h.action(
+            "workflow",
+            "manual",
+            payload,
+            self.reviewer_token,
+            idempotency_key=key,
+        )
+        changed = dict(payload)
+        changed["decision"] = "REJECTED"
+        conflict = self.h.action(
+            "workflow",
+            "manual",
+            changed,
+            self.reviewer_token,
+            idempotency_key=key,
+        )
+        accepted_json = accepted.json()
+        repeated_json = repeated.json()
+        self._record(
+            "manual-identical-repeat",
+            "review",
+            True,
+            accepted.status == 200
+            and repeated.status == 200
+            and accepted_json is not None
+            and same_action_result(accepted_json, repeated_json),
+        )
+        self._record("manual-changed-repeat-conflict", "review", 409, conflict.status)
+        completed = self._wait_operation(manual_operation, "COMPLETED")
+        decisions = self.h.psql_rows(
+            "SELECT source, principal, outcome, reason_hash FROM autocheck.decisions "
+            f"WHERE process_id = '{manual_process}'::uuid"
+        )
+        self._record(
+            "manual-audited-decision",
+            "review",
+            True,
+            len(completed) == 1
+            and completed[0].get("status") == "COMPLETED"
+            and len(decisions) == 1
+            and decisions[0].get("source") == "MANUAL"
+            and decisions[0].get("principal") == "reviewer"
+            and decisions[0].get("outcome") == "APPROVED"
+            and bool(decisions[0].get("reason_hash")),
+        )
+        return manual_operation, manual_process
+
+    def _check_recreate_and_hygiene(self, operation_ids: Sequence[str]) -> None:
+        for service in ("inbox-reconciler", "outbox-dispatcher"):
+            stopped = self.h.compose(("stop", service), timeout=30)
+            self.h.require_docker_result(
+                stopped, f"cannot stop {service} for recovery scenario"
+            )
+        recovery_operation, _ = self._create_and_submit(
+            "adapterRequest", "inbox-recovery"
+        )
+        recovery_external = self._external_request(recovery_operation)
+        recovery_external_id = self._text_id(
+            recovery_external[0].get("external_request_id"), "externalRequestId"
+        )
+        recovery_message_id = f"recovery-{secrets.token_hex(6)}"
+        recovery_legacy = {
+            "providerPaymentId": recovery_message_id,
+            "operationId": recovery_external_id,
+            "result": "REJECTED",
+            "message": "Recovery callback",
+            "occurredAt": "2026-09-04T12:00:00.456Z",
+        }
+        self.forbidden_log_values["recovery-callback-message"] = recovery_legacy[
+            "message"
+        ]
+        accepted = self.h.internal_http(
+            "receipt-adapter",
+            "POST",
+            self.callback_base + "/" + self.capability,
+            body=recovery_legacy,
+            headers={"Content-Type": "application/json"},
+        )
+        self._record(
+            "recovery-receipt-accepted",
+            "recovery",
+            True,
+            200 <= accepted.status < 300,
+        )
+        received = self._poll_rows(
+            "SELECT state FROM autocheck.inbox "
+            f"WHERE message_id = {self._sql_text(recovery_message_id)}",
+            lambda rows: len(rows) == 1 and rows[0].get("state") == "RECEIVED",
+        )
+        self._record(
+            "recovery-inbox-pending-before-recreate",
+            "recovery",
+            True,
+            len(received) == 1 and received[0].get("state") == "RECEIVED",
+        )
+        result = self.h.compose(
+            (
                 "up",
                 "-d",
                 "--no-build",
                 "--force-recreate",
-                *sorted(REQUIRED_SERVICES),
-            ],
+                *PYTHON_SERVICES,
+            ),
+            timeout=60,
+        )
+        self.h.require_docker_result(result, "Python services did not recreate")
+        after = {service: self.h.image_id(service) for service in PYTHON_SERVICES}
+        self._record(
+            "python-image-stable-after-recreate",
+            "recovery",
+            {service: self.image_ids[service] for service in PYTHON_SERVICES},
+            after,
+        )
+        applied = self._poll_rows(
+            "SELECT state FROM autocheck.inbox "
+            f"WHERE message_id = {self._sql_text(recovery_message_id)}",
+            lambda rows: len(rows) == 1 and rows[0].get("state") == "APPLIED",
+        )
+        recovered_operation = self._wait_operation(recovery_operation, "REJECTED")
+        self._record(
+            "reconciler-continues-after-recreate",
+            "recovery",
+            True,
+            len(applied) == 1
+            and applied[0].get("state") == "APPLIED"
+            and len(recovered_operation) == 1
+            and recovered_operation[0].get("status") == "REJECTED",
+        )
+        for operation_id in (*operation_ids, recovery_operation):
+            rows = self._operation(operation_id)
+            self._record(
+                f"operation-persists-{operation_id[:8]}",
+                "recovery",
+                1,
+                len(rows),
+            )
+        logs = self.h.compose(("logs", "--no-color"), timeout=30)
+        self.h.require_docker_result(logs, "cannot inspect candidate logs")
+        text = logs.stdout + "\n" + logs.stderr
+        leaked = [secret for secret in self.sensitive if secret and secret in text]
+        self._record("synthetic-secrets-not-in-logs", "security", [], leaked)
+        leaked_messages = sorted(
+            label
+            for label, value in self.forbidden_log_values.items()
+            if value
+            and (
+                value in text
+                or base64.b64encode(value.encode("utf-8")).decode("ascii") in text
+            )
+        )
+        self._record("full-messages-not-in-logs", "security", [], leaked_messages)
+        csharp_after = {
+            service: self.h.image_id(service)
+            for service in ("api", "worker-a", "worker-b")
+        }
+        self._record(
+            "csharp-images-not-recreated-with-python",
+            "security",
+            {service: self.image_ids[service] for service in csharp_after},
+            csharp_after,
+        )
+
+    def execute(self) -> None:
+        self._check_admission_and_start()
+        self._check_database_contract()
+        provider_operation, _ = self._check_provider_path()
+        adapter_operation, _ = self._check_adapter_deduplication()
+        manual_operation, _ = self._check_review()
+        self._check_recreate_and_hygiene(
+            (provider_operation, adapter_operation, manual_operation)
+        )
+
+    def cleanup(self) -> None:
+        if not self.cleanup_armed or self.args.keep_stack or self.harness is None:
+            return
+        result = self.harness.compose(
+            ("down", "--volumes", "--remove-orphans", "--rmi", "local"),
             timeout=600,
         )
-        if not up.ok and self.harness._environment_error(up):
-            raise EnvironmentFailure("Docker transport failed while starting the stack")
-        self.record(
-            "stack-start-no-build",
-            "admission",
-            up.ok,
-            "up --no-build succeeds",
-            {"exitCode": up.returncode},
-        )
-        if not up.ok:
-            return False
-        ready = self.harness.wait_ready(self.args.ready_timeout)
-        self.record(
-            "health",
-            "admission",
-            ready,
-            "live and ready return HTTP 200",
-            {"ready": ready},
-        )
-        if not ready:
-            return False
-        worker_security = self.harness.wait_worker_database_security()
-        security_ok = (
-            worker_security.get("roleVerified") is True
-            and worker_security.get("allDmlDenied") is True
-            and worker_security.get("executeBoundaryRestricted") is True
-        )
-        self.record(
-            "worker-database-security",
-            "admission",
-            security_ok,
-            "both workers use workflow_worker with only fixed EXECUTE boundaries and no table DML",
-            worker_security,
-        )
-        if not security_ok:
-            return False
-        after_up = {
-            "api": self.harness.image_id("api"),
-            "worker": self.harness.image_id("worker-a"),
-        }
-        self.record(
-            "baseline-images",
-            "admission",
-            after_up == self.baseline_images,
-            self.baseline_images,
-            after_up,
-        )
-        return after_up == self.baseline_images
-
-    def _view_count(self, view: str, where: str = "") -> int:
-        if view not in AUTOCHECK_VIEWS:
-            raise ValueError("Unknown stable view")
-        suffix = f" WHERE {where}" if where else ""
-        rows = self.harness.psql_rows(
-            f"SELECT count(*)::integer AS count FROM autocheck.{view}{suffix}"
-        )
-        if len(rows) != 1 or not isinstance(rows[0].get("count"), int):
-            raise ContractError(f"autocheck.{view} did not return one integer count")
-        return int(rows[0]["count"])
-
-    def _view_schema_rows(self) -> list[dict[str, Any]]:
-        names = ", ".join(_sql_literal(name) for name in sorted(AUTOCHECK_VIEWS))
-        return self.harness.psql_rows(
-            "SELECT c.relname AS view_name, c.relkind::text AS relation_kind, "
-            "a.attnum::integer AS ordinal, a.attname AS column_name, "
-            "pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type "
-            "FROM pg_catalog.pg_class c "
-            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-            "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
-            "WHERE n.nspname = 'autocheck' AND c.relname IN ("
-            f"{names}) AND a.attnum > 0 AND NOT a.attisdropped "
-            "ORDER BY c.relname, a.attnum"
-        )
-
-    def _process_rows(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT process_id::text, business_key, flow_name, flow_version, state, "
-            "current_step_key, created_at, updated_at FROM autocheck.processes "
-            f"WHERE process_id = {_sql_literal(process_id)}"
-        )
-
-    def _poll_process(
-        self, process_id: str, states: set[str], timeout: float = 8
-    ) -> dict[str, Any]:
-        rows = self.harness.poll_rows(
-            "SELECT process_id::text, business_key, flow_name, flow_version, state, "
-            "current_step_key, created_at, updated_at FROM autocheck.processes "
-            f"WHERE process_id = {_sql_literal(process_id)}",
-            lambda values: len(values) == 1 and values[0].get("state") in states,
-            timeout=timeout,
-        )
-        return rows[0]
-
-    def _jobs(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT job_id::text, process_id::text, step_instance_id::text, execution_id::text, "
-            "state, lease_owner, lease_version, lease_until, attempt_count, next_attempt_at "
-            "FROM autocheck.jobs "
-            f"WHERE process_id = {_sql_literal(process_id)} ORDER BY job_id"
-        )
-
-    def _attempts(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT a.attempt_id::text, a.job_id::text, a.execution_id::text, "
-            "a.lease_version, a.attempt_number, a.status, a.outcome, a.error_code, "
-            "a.started_at, a.finished_at FROM autocheck.attempts a "
-            "JOIN autocheck.jobs j ON j.job_id = a.job_id "
-            f"WHERE j.process_id = {_sql_literal(process_id)} ORDER BY a.attempt_number"
-        )
-
-    def _steps(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT step_instance_id::text, process_id::text, step_key, step_type, state, "
-            "outcome, entered_at, completed_at FROM autocheck.steps "
-            f"WHERE process_id = {_sql_literal(process_id)} ORDER BY entered_at, step_instance_id"
-        )
-
-    def _signals(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT message_id, process_id::text, signal_type, body_hash, status, received_at "
-            "FROM autocheck.signals "
-            f"WHERE process_id = {_sql_literal(process_id)} ORDER BY received_at, message_id"
-        )
-
-    def _events(self, process_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT event_id::text, process_id::text, step_instance_id::text, event_type, "
-            "occurred_at FROM autocheck.workflow_events "
-            f"WHERE process_id = {_sql_literal(process_id)} ORDER BY occurred_at, event_id"
-        )
-
-    def _dispatches(self, execution_id: str) -> list[dict[str, Any]]:
-        return self.harness.psql_rows(
-            "SELECT correlation_id::text, request_id, module, action, version, principal, "
-            "payload_hash, status, outcome, occurred_at FROM autocheck.action_dispatches "
-            f"WHERE request_id = {_sql_literal(execution_id)} ORDER BY occurred_at, correlation_id"
-        )
-
-    def _effects(self, execution_id: str) -> list[dict[str, Any]]:
-        return self.harness.effect_rows(
-            str(self.fixture["targetSchema"]),
-            str(self.fixture["effectTable"]),
-            execution_id,
-        )
-
-    def _start(
-        self,
-        label: str,
-        mode: str,
-        *,
-        business_key: str | None = None,
-        input_text: str | None = None,
-        remember: bool = True,
-    ) -> tuple[CommandResult, dict[str, Any] | None, str | None]:
-        key = business_key or f"{self.fixture['businessKeys'][mode]}-{label}"
-        data_path = (
-            "/dev/stdin"
-            if input_text is not None
-            else f"/autocheck/input/{self.files['processData'][mode]}"
-        )
-        result, body = self.harness.cli(
-            "flow",
-            "start",
-            self.flow,
-            "--business-key",
-            key,
-            "--data",
-            data_path,
-            input_text=input_text,
-        )
-        if not self.harness.ok_envelope(result, body):
-            return result, body, None
-        process_id = (
-            body.get("result", {}).get("processId")
-            if isinstance(body.get("result"), dict)
-            else None
-        )
-        try:
-            normalized = str(uuid.UUID(str(process_id)))
-        except (ValueError, AttributeError):
-            return result, body, None
-        if normalized != str(process_id).casefold() or normalized == str(
-            uuid.UUID(int=0)
-        ):
-            return result, body, None
-        if remember:
-            self.processes[label] = normalized
-        return result, body, normalized
-
-    def publication(self) -> None:
-        commands = [
-            self.harness.cli(
-                "migration", "apply", "/autocheck/input/migrations", timeout=120
-            ),
-            self.harness.cli(
-                "migration", "apply", "/autocheck/input/migrations", timeout=120
-            ),
-            self.harness.cli(
-                "action", "validate", f"/autocheck/input/{self.files['actionManifest']}"
-            ),
-            self.harness.cli(
-                "action", "publish", f"/autocheck/input/{self.files['actionManifest']}"
-            ),
-            self.harness.cli(
-                "action", "publish", f"/autocheck/input/{self.files['actionManifest']}"
-            ),
-            self.harness.cli(
-                "action",
-                "validate",
-                f"/autocheck/input/{self.files['disabledActionManifest']}",
-            ),
-            self.harness.cli(
-                "action",
-                "publish",
-                f"/autocheck/input/{self.files['disabledActionManifest']}",
-            ),
-            self.harness.cli(
-                "action", "activate", f"{self.module}.{self.action}", "--version", "1"
-            ),
-        ]
-        post_migration_security = self.harness.wait_worker_database_security()
-        post_migration_security_ok = (
-            post_migration_security.get("roleVerified") is True
-            and post_migration_security.get("allDmlDenied") is True
-            and post_migration_security.get("executeBoundaryRestricted") is True
-        )
-        self.record(
-            "worker-database-security-post-migration",
-            "publication",
-            post_migration_security_ok,
-            "workflow_worker keeps fixed EXECUTE boundaries and no table DML after migration",
-            post_migration_security,
-        )
-        definitions = self.harness.psql_rows(
-            "SELECT module, action, version, enabled, is_default FROM autocheck.action_definitions "
-            f"WHERE module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)} "
-            "ORDER BY version"
-        )
-        action_ok = (
-            all(self.harness.ok_envelope(result, body) for result, body in commands)
-            and post_migration_security_ok
-        )
-        action_ok = action_ok and definitions == [
-            {
-                "module": self.module,
-                "action": self.action,
-                "version": 1,
-                "enabled": True,
-                "is_default": True,
-            },
-            {
-                "module": self.module,
-                "action": self.action,
-                "version": 2,
-                "enabled": False,
-                "is_default": False,
-            },
-        ]
-        self.record(
-            "migration-and-action-publication",
-            "publication",
-            action_ok,
-            "repeatable migration and v1/v2 action publication through CLI",
-            {
-                "commands": [self._command_view(*item) for item in commands],
-                "definitions": definitions,
-            },
-        )
-        if not action_ok:
-            raise ContractError("Migration or action publication prerequisite failed")
-
-        valid_paths = (self.files["flowV1Json"], self.files["flowV1Yaml"])
-        valid_results = [
-            self.harness.cli("flow", "validate", f"/autocheck/input/{path}")
-            for path in valid_paths
-        ]
-        invalid_paths = [
-            *self.files["invalidMaps"]["schema"],
-            *self.files["invalidMaps"]["semantic"],
-        ]
-        invalid_validation = [
-            self.harness.cli("flow", "validate", f"/autocheck/input/{path}")
-            for path in invalid_paths
-        ]
-        before = self._view_count("flow_versions")
-        invalid_publication = [
-            self.harness.cli("flow", "publish", f"/autocheck/input/{path}")
-            for path in invalid_paths
-        ]
-        after = self._view_count("flow_versions")
-        publish = self.harness.cli(
-            "flow", "publish", f"/autocheck/input/{self.files['flowV1Json']}"
-        )
-        repeat = self.harness.cli(
-            "flow", "publish", f"/autocheck/input/{self.files['flowV1Yaml']}"
-        )
-        source = json.loads(
-            (self.fixtures / self.files["flowV1Json"]).read_text(encoding="utf-8")
-        )
-        source["steps"][0]["task"]["timeout_ms"] -= 1
-        conflict = self.harness.cli(
-            "flow", "publish", "/dev/stdin", input_text=json.dumps(source)
-        )
-        activate = self.harness.cli("flow", "activate", self.flow, "--version", "1")
-        version_rows = self.harness.psql_rows(
-            "SELECT flow_name, flow_version, status, is_active, published_at "
-            "FROM autocheck.flow_versions "
-            f"WHERE flow_name = {_sql_literal(self.flow)} ORDER BY flow_version"
-        )
-        map_ok = (
-            all(self.harness.ok_envelope(*item) for item in valid_results)
-            and all(
-                self.harness.error_envelope(result, body)
-                for result, body in invalid_validation
-            )
-            and all(
-                self.harness.error_envelope(result, body)
-                for result, body in invalid_publication
-            )
-            and before == after
-            and self.harness.ok_envelope(*publish)
-            and self.harness.ok_envelope(*repeat)
-            and self.harness.error_envelope(*conflict)
-            and self.harness.ok_envelope(*activate)
-            and len(version_rows) == 1
-            and version_rows[0].get("flow_version") == 1
-            and version_rows[0].get("is_active") is True
-        )
-        self.record(
-            "map-validation-and-publication",
-            "publication",
-            map_ok,
-            "valid JSON/YAML accepted; every invalid map rejected without side effects",
-            {
-                "invalidMapCount": len(invalid_paths),
-                "invalidValidateRejected": sum(
-                    not result.ok for result, _ in invalid_validation
-                ),
-                "invalidPublishRejected": sum(
-                    not result.ok for result, _ in invalid_publication
-                ),
-                "countBefore": before,
-                "countAfter": after,
-                "versionRows": version_rows,
-            },
-        )
-        if not map_ok:
-            raise ContractError(
-                "Workflow map validation/publication prerequisite failed"
-            )
-        current = {
-            "api": self.harness.image_id("api"),
-            "worker": self.harness.image_id("worker-a"),
-        }
-        unchanged = (
-            current == self.baseline_images
-            and self.harness.image_id("worker-b") == current["worker"]
-        )
-        self.record(
-            "publication-image-immutability",
-            "publication",
-            unchanged,
-            self.baseline_images,
-            current,
-        )
-
-    def execution(self) -> None:
-        start, body, process_id = self._start("signal", "signal")
-        if process_id is None:
-            raise ContractError(
-                f"Signal-route process did not start: {self._command_view(start, body)}"
-            )
-        waiting = self._poll_process(process_id, {"WAITING_SIGNAL"})
-        jobs = self._jobs(process_id)
-        attempts = self._attempts(process_id)
-        execution_id = str(jobs[0].get("execution_id")) if len(jobs) == 1 else ""
-        dispatches = self._dispatches(execution_id) if execution_id else []
-        effects = self._effects(execution_id) if execution_id else []
-        flow_get = self.harness.cli("flow", "get", process_id)
-        flow_get_result = (
-            flow_get[1].get("result")
-            if self.harness.ok_envelope(*flow_get)
-            and isinstance(flow_get[1].get("result"), dict)
-            else {}
-        )
-        flow_get_ok = (
-            flow_get_result.get("resource") == "process"
-            and flow_get_result.get("processId") == process_id
-            and flow_get_result.get("flowName") == self.flow
-            and flow_get_result.get("flowVersion") == 1
-            and flow_get_result.get("state") == "WAITING_SIGNAL"
-            and flow_get_result.get("currentStepKey") == self.fixture["steps"]["wait"]
-        )
-        workflow_get = self.harness.post_action(
-            "workflow", "get", {"processId": process_id}, ("workflow:read",)
-        )
-        workflow_result = (
-            workflow_get.body.get("result")
-            if workflow_get.status == 200
-            and isinstance(workflow_get.body, dict)
-            and workflow_get.body.get("status") == "ok"
-            and isinstance(workflow_get.body.get("result"), dict)
-            else {}
-        )
-        workflow_get_ok = (
-            isinstance(workflow_result.get("process"), dict)
-            and workflow_result["process"].get("processId") == process_id
-            and all(
-                isinstance(workflow_result.get(name), list)
-                for name in ("steps", "jobs", "attempts")
-            )
-        )
-        automatic_ok = (
-            process_state_matches(
-                waiting, "WAITING_SIGNAL", str(self.fixture["steps"]["wait"])
-            )
-            and len(jobs) == 1
-            and job_attempts_consistent(
-                jobs[0], attempts, str(self.fixture["outcomes"]["signal"])
-            )
-            and len(dispatches) == 1
-            and action_dispatch_matches(
-                dispatches[0],
-                execution_id=execution_id,
-                module=self.module,
-                action=self.action,
-                outcome=str(self.fixture["outcomes"]["signal"]),
-            )
-            and len(effects) == 1
-            and effects[0].get("business_value")
-            == self.fixture["businessValues"]["signal"]
-            and flow_get_ok
-            and workflow_get_ok
-        )
-
-        signals_before = self._signals(process_id)
-        events_before = self._events(process_id)
-        signal_args = (
-            "flow",
-            "signal",
-            process_id,
-            "--type",
-            str(self.fixture["signalType"]),
-            "--message-id",
-            str(self.fixture["signalMessageId"]),
-            "--payload",
-        )
-        accepted = self.harness.cli(
-            *signal_args, f"/autocheck/input/{self.files['signalData']}"
-        )
-        completed = self._poll_process(process_id, {"COMPLETED"})
-        signals_accepted = self._signals(process_id)
-        events_accepted = self._events(process_id)
-        duplicate = self.harness.cli(
-            *signal_args, f"/autocheck/input/{self.files['signalData']}"
-        )
-        signals_duplicate = self._signals(process_id)
-        events_duplicate = self._events(process_id)
-        signal_data = json.loads(
-            (self.fixtures / self.files["signalData"]).read_text(encoding="utf-8")
-        )
-        if not isinstance(signal_data, dict) or len(signal_data) != 1:
-            raise FixtureError("Signal fixture must contain exactly one property")
-        signal_key = next(iter(signal_data))
-        changed_signal = {signal_key: str(signal_data[signal_key]) + "-changed"}
-        conflict = self.harness.cli(
-            *signal_args, "/dev/stdin", input_text=json.dumps(changed_signal)
-        )
-        signals_conflict = self._signals(process_id)
-        events_conflict = self._events(process_id)
-        steps = self._steps(process_id)
-        accepted_status = (
-            accepted[1].get("result", {}).get("status")
-            if self.harness.ok_envelope(*accepted)
-            else None
-        )
-        duplicate_status = (
-            duplicate[1].get("result", {}).get("status")
-            if self.harness.ok_envelope(*duplicate)
-            else None
-        )
-        end_ok = any(
-            row.get("step_key") == self.fixture["steps"]["end"]
-            and row.get("step_type") == "END"
-            and row.get("state") == "COMPLETED"
-            and row.get("outcome") == self.fixture["outcomes"]["completed"]
-            for row in steps
-        )
-        self.record(
-            "automatic-signal-end",
-            "execution",
-            automatic_ok
-            and process_state_matches(
-                completed, "COMPLETED", str(self.fixture["steps"]["end"])
-            )
-            and end_ok,
-            "automatic -> wait_signal -> end with one action effect",
-            {
-                "automatic": automatic_ok,
-                "finalState": completed.get("state"),
-                "endStep": end_ok,
-                "flowGet": flow_get_ok,
-                "workflowGet": workflow_get_ok,
-            },
-        )
-        old_events = {row.get("event_id"): row for row in events_before}
-        accepted_events = {row.get("event_id"): row for row in events_accepted}
-        history_ok = (
-            signals_before == []
-            and len(signals_accepted) == 1
-            and signals_duplicate == signals_accepted
-            and signals_conflict == signals_accepted
-            and len(events_accepted) > len(events_before)
-            and all(accepted_events.get(key) == row for key, row in old_events.items())
-            and events_duplicate == events_accepted
-            and events_conflict == events_accepted
-        )
-        signal_ok = (
-            accepted_status == "accepted"
-            and duplicate_status == "duplicate"
-            and self.harness.error_envelope(*conflict)
-            and "conflict" in str(self.harness.error_code(conflict[1]))
-            and history_ok
-        )
-
-        stopped = self.harness.compose(["stop", "worker-a", "worker-b"], timeout=30)
-        self.harness.require(stopped, "Cannot stop workers for the early-signal probe")
-        early_start, early_body, early_id = self._start(
-            "early-signal", "signal", remember=False
-        )
-        if early_id is None:
-            restored = self.harness.compose(
-                ["up", "-d", "--no-build", "worker-a", "worker-b"], timeout=40
-            )
-            self.harness.require(
-                restored, "Cannot restore workers after early-signal setup"
-            )
-            raise ContractError(
-                f"Early-signal process did not start: {self._command_view(early_start, early_body)}"
-            )
-        early_message_id = f"{self.fixture['signalMessageId']}-early"
-        early_args = (
-            "flow",
-            "signal",
-            early_id,
-            "--type",
-            str(self.fixture["signalType"]),
-            "--message-id",
-            early_message_id,
-            "--payload",
-        )
-        early_accepted = self.harness.cli(
-            *early_args, f"/autocheck/input/{self.files['signalData']}"
-        )
-        early_before_resume = self._signals(early_id)
-        restarted = self.harness.compose(
-            ["up", "-d", "--no-build", "worker-a", "worker-b"], timeout=40
-        )
-        self.harness.require(restarted, "Cannot restart workers for the early signal")
-        early_completed = self._poll_process(early_id, {"COMPLETED"}, timeout=8)
-        early_after_resume = self._signals(early_id)
-        global_conflict = self.harness.cli(
-            "flow",
-            "signal",
-            process_id,
-            "--type",
-            str(self.fixture["signalType"]),
-            "--message-id",
-            early_message_id,
-            "--payload",
-            f"/autocheck/input/{self.files['signalData']}",
-        )
-        early_after_conflict = self._signals(early_id)
-        original_after_conflict = self._signals(process_id)
-        early_status = (
-            early_accepted[1].get("result", {}).get("status")
-            if self.harness.ok_envelope(*early_accepted)
-            else None
-        )
-        early_ok = (
-            early_status == "accepted"
-            and len(early_before_resume) == 1
-            and early_before_resume[0].get("status") == "ACCEPTED"
-            and process_state_matches(
-                early_completed, "COMPLETED", str(self.fixture["steps"]["end"])
-            )
-            and len(early_after_resume) == 1
-            and early_after_resume[0].get("status") == "APPLIED"
-            and self.harness.error_envelope(*global_conflict)
-            and "conflict" in str(self.harness.error_code(global_conflict[1]))
-            and early_after_conflict == early_after_resume
-            and original_after_conflict == signals_conflict
-        )
-        self.record(
-            "signal-idempotency-and-history",
-            "execution",
-            signal_ok and early_ok,
-            "accepted, duplicate, global conflict and early delivery reconciliation",
-            {
-                "accepted": accepted_status,
-                "duplicate": duplicate_status,
-                "conflictCode": self.harness.error_code(conflict[1]),
-                "signalCounts": [
-                    len(signals_before),
-                    len(signals_accepted),
-                    len(signals_duplicate),
-                    len(signals_conflict),
-                ],
-                "eventCounts": [
-                    len(events_before),
-                    len(events_accepted),
-                    len(events_duplicate),
-                    len(events_conflict),
-                ],
-                "earlyAccepted": early_status,
-                "earlyFinalState": early_completed.get("state"),
-                "earlySignalState": (
-                    early_after_resume[0].get("status")
-                    if len(early_after_resume) == 1
-                    else None
-                ),
-                "crossProcessConflictCode": self.harness.error_code(global_conflict[1]),
-            },
-        )
-
-        manual_start, manual_body, manual_id = self._start("manual", "manual")
-        if manual_id is None:
-            raise ContractError(
-                f"Manual-route process did not start: {self._command_view(manual_start, manual_body)}"
-            )
-        manual = self._poll_process(manual_id, {"WAITING_MANUAL"})
-        manual_steps = self._steps(manual_id)
-        manual_ok = process_state_matches(
-            manual, "WAITING_MANUAL", str(self.fixture["steps"]["manual"])
-        ) and any(
-            row.get("step_key") == self.fixture["steps"]["manual"]
-            and row.get("step_type") == "MANUAL"
-            and row.get("state") == "WAITING"
-            for row in manual_steps
-        )
-        self.record(
-            "manual-wait",
-            "execution",
-            manual_ok,
-            "persistent WAITING_MANUAL",
-            {"process": manual, "stepCount": len(manual_steps)},
-        )
-
-        view_counts: dict[str, int | str] = {}
-        for view in sorted(AUTOCHECK_VIEWS):
-            try:
-                view_counts[view] = self._view_count(view)
-            except ContractError:
-                view_counts[view] = "unavailable"
-        schema_rows = self._view_schema_rows()
-        schemas_match = stable_view_schemas_match(schema_rows)
-        stable = (
-            all(isinstance(value, int) for value in view_counts.values())
-            and schemas_match
-        )
-        self.record(
-            "stable-views",
-            "execution",
-            stable,
-            {"views": sorted(AUTOCHECK_VIEWS), "exactSchemas": True},
-            {"counts": view_counts, "exactSchemas": schemas_match},
-        )
-
-    def versioning(self) -> None:
-        publish = self.harness.cli(
-            "flow", "publish", f"/autocheck/input/{self.files['flowV2Json']}"
-        )
-        activate = self.harness.cli("flow", "activate", self.flow, "--version", "2")
-        if not self.harness.ok_envelope(*publish) or not self.harness.ok_envelope(
-            *activate
-        ):
-            raise ContractError("Flow v2 could not be published and activated")
-        rows = self.harness.psql_rows(
-            "SELECT flow_name, flow_version, status, is_active, published_at "
-            "FROM autocheck.flow_versions "
-            f"WHERE flow_name = {_sql_literal(self.flow)} ORDER BY flow_version"
-        )
-        start, body, process_id = self._start(
-            "v2", "signal", business_key=str(self.fixture["businessKeys"]["v2"])
-        )
-        if process_id is None:
-            raise ContractError(
-                f"Flow v2 process did not start: {self._command_view(start, body)}"
-            )
-        new_process = self._poll_process(process_id, {"WAITING_MANUAL"})
-        old_id = self.processes.get("manual") or self.processes.get("signal")
-        old_rows = self._process_rows(str(old_id)) if old_id else []
-        same = self._start(
-            "v2-repeat",
-            "signal",
-            business_key=str(self.fixture["businessKeys"]["v2"]),
-            remember=False,
-        )
-        changed_data = (self.fixtures / self.files["processData"]["changed"]).read_text(
-            encoding="utf-8"
-        )
-        changed = self._start(
-            "v2-conflict",
-            "signal",
-            business_key=str(self.fixture["businessKeys"]["v2"]),
-            input_text=changed_data,
-            remember=False,
-        )
-        jobs = self._jobs(process_id)
-        execution_id = str(jobs[0].get("execution_id")) if len(jobs) == 1 else ""
-        dispatches = self._dispatches(execution_id) if execution_id else []
-        effects = self._effects(execution_id) if execution_id else []
-        valid = (
-            exact_active_version(rows, 2)
-            and len(old_rows) == 1
-            and old_rows[0].get("flow_version") == 1
-            and new_process.get("flow_version") == 2
-            and process_state_matches(
-                new_process, "WAITING_MANUAL", str(self.fixture["steps"]["manual"])
-            )
-            and same[2] == process_id
-            and self.harness.error_envelope(changed[0], changed[1])
-            and "conflict" in str(self.harness.error_code(changed[1]))
-            and len(dispatches) == 1
-            and action_dispatch_matches(
-                dispatches[0],
-                execution_id=execution_id,
-                module=self.module,
-                action=self.action,
-                outcome=str(self.fixture["outcomes"]["signal"]),
-            )
-            and len(effects) == 1
-            and effects[0].get("business_value")
-            == self.fixture["businessValues"]["signal"]
-        )
-        self.record(
-            "version-pinning-and-start-idempotency",
-            "versioning",
-            valid,
-            "old=v1, new=v2, action=v1, same start replays, changed data conflicts",
-            {
-                "oldVersion": old_rows[0].get("flow_version") if old_rows else None,
-                "newVersion": new_process.get("flow_version"),
-                "sameProcess": same[2] == process_id,
-                "changedCode": self.harness.error_code(changed[1]),
-                "actionVersions": [row.get("version") for row in dispatches],
-                "activeVersions": [
-                    row.get("flow_version")
-                    for row in rows
-                    if row.get("is_active") is True
-                ],
-            },
-        )
-
-        unknown_start, unknown_body, unknown_id = self._start("unknown", "unknown")
-        if unknown_id is None:
-            raise ContractError(
-                f"Unknown-outcome process did not start: {self._command_view(unknown_start, unknown_body)}"
-            )
-        unknown_process = self._poll_process(unknown_id, {"FAILED"})
-        unknown_jobs = self._jobs(unknown_id)
-        unknown_attempts = self._attempts(unknown_id)
-        unknown_execution = (
-            str(unknown_jobs[0].get("execution_id")) if len(unknown_jobs) == 1 else ""
-        )
-        if not terminal_failure_consistent(
-            unknown_process,
-            unknown_jobs,
-            unknown_attempts,
-            self._effects(unknown_execution) if unknown_execution else [],
-            expected_attempts=1,
-        ):
-            unknown_terminal = False
-        else:
-            unknown_terminal = True
-        for item in self.checks:
-            if item["name"] == "version-pinning-and-start-idempotency":
-                if isinstance(item.get("actual"), dict):
-                    item["actual"]["unknownOutcomeTerminal"] = unknown_terminal
-                if not unknown_terminal:
-                    item["status"] = "failed"
-                break
-
-    def _snapshot(self, process_id: str, execution_id: str) -> dict[str, Any]:
-        return {
-            "counts": {
-                view: self._view_count(view) for view in sorted(AUTOCHECK_VIEWS)
-            },
-            "processes": self._process_rows(process_id),
-            "steps": self._steps(process_id),
-            "jobs": self._jobs(process_id),
-            "attempts": self._attempts(process_id),
-            "signals": self._signals(process_id),
-            "events": self._events(process_id),
-            "dispatches": self._dispatches(execution_id),
-            "effects": self._effects(execution_id),
-        }
-
-    def concurrency(self) -> None:
-        activate = self.harness.cli("flow", "activate", self.flow, "--version", "1")
-        if not self.harness.ok_envelope(*activate):
-            raise ContractError(
-                "Flow v1 could not be activated for the concurrency scenario"
-            )
-        stopped = self.harness.compose(["stop", "worker-a", "worker-b"], timeout=30)
-        self.harness.require(
-            stopped, "Cannot stop workers for the deterministic claim scenario"
-        )
-        before_dispatch = self._view_count(
-            "action_dispatches",
-            f"module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)}",
-        )
-        start, body, process_id = self._start("concurrent", "signal")
-        if process_id is None:
-            raise ContractError(
-                f"Concurrency process did not start: {self._command_view(start, body)}"
-            )
-        queued = self._jobs(process_id)
-        if len(queued) != 1 or queued[0].get("state") != "READY":
-            raise ContractError(
-                "The stopped workers did not leave one logical READY job"
-            )
-        created = self.harness.compose(
-            ["create", "--no-build", "--force-recreate", "worker-a", "worker-b"],
-            timeout=40,
-            failpoint="after_job_claim",
-        )
-        self.harness.require(created, "Cannot create both workers with after_job_claim")
-        container_ids = self.harness.service_container_ids(
-            ("worker-a", "worker-b"), include_stopped=True
-        )
-        postgres_id = self.harness.service_container_ids(("postgres",))["postgres"]
-        started = self.harness.run(
-            ["docker", "start", container_ids["worker-a"], container_ids["worker-b"]],
-            timeout=20,
-            failpoint="after_job_claim",
-        )
-        self.harness.require(started, "Cannot start both workers with after_job_claim")
-        initial_claim_row = self.harness.poll_rows(
-            "SELECT job_id::text, process_id::text, execution_id::text, state, "
-            "lease_owner, lease_version, attempt_count FROM autocheck.jobs "
-            f"WHERE process_id = {_sql_literal(process_id)}",
-            lambda rows: (
-                len(rows) == 1
-                and rows[0].get("state") == "LEASED"
-                and rows[0].get("lease_owner") in {"worker-a", "worker-b"}
-                and rows[0].get("attempt_count") == 1
-            ),
-            timeout=8,
-            container_id=postgres_id,
-        )[0]
-        winner = str(initial_claim_row["lease_owner"])
-        loser = "worker-b" if winner == "worker-a" else "worker-a"
-        winner_ack = self.harness.wait_failpoint(
-            winner,
-            "after_job_claim",
-            container_id=container_ids[winner],
-        )
-        killed = self.harness.run(["docker", "kill", container_ids[winner]], timeout=20)
-        self.harness.require(killed, "Cannot kill the acknowledged claim winner")
-        loser_ack = self.harness.wait_failpoint(loser, "after_job_claim", timeout=8)
-        reclaimed = self.harness.poll_rows(
-            "SELECT job_id::text, process_id::text, execution_id::text, state, lease_owner, "
-            "lease_version, attempt_count FROM autocheck.jobs "
-            f"WHERE process_id = {_sql_literal(process_id)}",
-            lambda rows: (
-                len(rows) == 1
-                and rows[0].get("state") == "LEASED"
-                and rows[0].get("lease_owner") == loser
-                and rows[0].get("attempt_count") == 2
-            ),
-            timeout=8,
-        )[0]
-        reclaimed_attempts = self._attempts(process_id)
-        first_attempt = reclaimed_attempts[0] if reclaimed_attempts else {}
-        initial_lease = first_attempt.get("lease_version")
-        initial_claim = (
-            len(reclaimed_attempts) == 2
-            and first_attempt.get("attempt_number") == 1
-            and first_attempt.get("status") == "STALE"
-            and strictly_increasing_integer(
-                reclaimed.get("lease_version"), initial_lease
-            )
-        )
-        reclaimed_ok = (
-            reclaimed.get("attempt_count") == 2
-            and len(reclaimed_attempts) == 2
-            and len({row.get("attempt_id") for row in reclaimed_attempts}) == 2
-            and reclaimed_attempts[-1].get("attempt_number") == 2
-            and reclaimed_attempts[-1].get("lease_version")
-            == reclaimed.get("lease_version")
-            and reclaimed_attempts[-1].get("status") == "RUNNING"
-        )
-        execution_id = str(reclaimed["execution_id"])
-        before_stale = self._snapshot(process_id, execution_id)
-        stale = self.harness.cli(
-            "flow",
-            "test-finish",
-            str(reclaimed["job_id"]),
-            "--owner",
-            winner,
-            "--lease-version",
-            str(initial_lease),
-            "--outcome",
-            str(self.fixture["outcomes"]["signal"]),
-            "--result",
-            f"/autocheck/input/{self.files['resultData']}",
-        )
-        after_stale = self._snapshot(process_id, execution_id)
-        stale_ok = (
-            self.harness.error_envelope(*stale)
-            and self.harness.error_code(stale[1]) == "workflow.lease_stale"
-            and before_stale == after_stale
-        )
-        killed_loser = self.harness.compose(["kill", loser], timeout=20)
-        self.harness.require(
-            killed_loser, "Cannot stop the reclaiming failpoint worker"
-        )
-        restart = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", loser], timeout=40
-        )
-        self.harness.require(
-            restart, "Cannot restart the reclaiming worker without a failpoint"
-        )
-        self._poll_process(process_id, {"WAITING_SIGNAL"}, timeout=8)
-        final_jobs = self._jobs(process_id)
-        attempts = self._attempts(process_id)
-        effects = self._effects(execution_id)
-        after_dispatch = self._view_count(
-            "action_dispatches",
-            f"module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)}",
-        )
-        valid = (
-            initial_claim
-            and reclaimed_ok
-            and winner_ack.get("instanceId") == winner
-            and loser_ack.get("instanceId") == loser
-            and reclaimed.get("job_id") == queued[0].get("job_id")
-            and reclaimed.get("execution_id") == queued[0].get("execution_id")
-            and stale_ok
-            and len(final_jobs) == 1
-            and final_jobs[0].get("state") == "SUCCEEDED"
-            and final_jobs[0].get("job_id") == reclaimed.get("job_id")
-            and final_jobs[0].get("execution_id") == execution_id
-            and strictly_increasing_integer(
-                final_jobs[0].get("lease_version"), reclaimed.get("lease_version")
-            )
-            and len(attempts) >= 3
-            and len({row.get("attempt_id") for row in attempts}) == len(attempts)
-            and all(
-                row.get("job_id") == reclaimed.get("job_id")
-                and row.get("execution_id") == execution_id
-                for row in attempts
-            )
-            and sum(row.get("status") == "SUCCEEDED" for row in attempts) == 1
-            and after_dispatch - before_dispatch == 1
-            and len(effects) == 1
-        )
-        self.record(
-            "two-worker-reclaim-and-stale-finish",
-            "concurrency",
-            valid,
-            "one winner, same job/execution reclaim, stale finish rejected, one effect",
-            {
-                "winner": winner,
-                "loser": loser,
-                "initialClaim": initial_claim,
-                "reclaimedAttempt": reclaimed_ok,
-                "sameJob": reclaimed.get("job_id") == queued[0].get("job_id"),
-                "sameExecution": reclaimed.get("execution_id")
-                == queued[0].get("execution_id"),
-                "leaseVersions": [
-                    initial_lease,
-                    reclaimed.get("lease_version"),
-                    final_jobs[0].get("lease_version") if final_jobs else None,
-                ],
-                "staleCode": self.harness.error_code(stale[1]),
-                "staleSnapshotUnchanged": before_stale == after_stale,
-                "attemptCount": len(attempts),
-                "dispatchDelta": after_dispatch - before_dispatch,
-                "effectCount": len(effects),
-            },
-        )
-        normal = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-a", "worker-b"],
-            timeout=40,
-        )
-        self.harness.require(
-            normal, "Cannot restore both workers after the concurrency scenario"
-        )
-
-    def recovery(self) -> None:
-        stopped = self.harness.compose(["stop", "worker-a", "worker-b"], timeout=30)
-        self.harness.require(stopped, "Cannot stop workers for the rollback scenario")
-        before_dispatch = self._view_count(
-            "action_dispatches",
-            f"module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)}",
-        )
-        start, body, process_id = self._start("atomic", "signal")
-        if process_id is None:
-            raise ContractError(
-                f"Rollback process did not start: {self._command_view(start, body)}"
-            )
-        up = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-a"],
-            timeout=40,
-            failpoint="after_action_before_finish",
-        )
-        self.harness.require(
-            up, "Cannot start worker-a with after_action_before_finish"
-        )
-        ack = self.harness.wait_failpoint("worker-a", "after_action_before_finish")
-        held_jobs = self._jobs(process_id)
-        if len(held_jobs) != 1:
-            raise ContractError("Rollback scenario did not expose one held job")
-        held = held_jobs[0]
-        killed = self.harness.compose(["kill", "worker-a"], timeout=20)
-        self.harness.require(
-            killed, "Cannot kill worker-a at the action/finish boundary"
-        )
-        effects_at_crash = self._effects(str(held["execution_id"]))
-        dispatch_at_crash = self._view_count(
-            "action_dispatches",
-            f"module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)}",
-        )
-        restart = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-b"], timeout=40
-        )
-        self.harness.require(restart, "Cannot start worker-b for rollback recovery")
-        self._poll_process(process_id, {"WAITING_SIGNAL"}, timeout=8)
-        final_jobs = self._jobs(process_id)
-        final_effects = self._effects(str(held["execution_id"]))
-        final_dispatch = self._view_count(
-            "action_dispatches",
-            f"module = {_sql_literal(self.module)} AND action = {_sql_literal(self.action)}",
-        )
-        valid = (
-            ack.get("instanceId") == "worker-a"
-            and not effects_at_crash
-            and dispatch_at_crash == before_dispatch
-            and len(final_effects) == 1
-            and final_dispatch - before_dispatch == 1
-            and len(final_jobs) == 1
-            and final_jobs[0].get("state") == "SUCCEEDED"
-            and final_jobs[0].get("job_id") == held.get("job_id")
-            and final_jobs[0].get("execution_id") == held.get("execution_id")
-        )
-        self.record(
-            "action-finish-rollback-and-recovery",
-            "recovery",
-            valid,
-            "zero partial effects at crash and one committed effect after recovery",
-            {
-                "effectAtCrash": len(effects_at_crash),
-                "dispatchAtCrash": dispatch_at_crash - before_dispatch,
-                "effectAfterRecovery": len(final_effects),
-                "dispatchAfterRecovery": final_dispatch - before_dispatch,
-                "sameJob": len(final_jobs) == 1
-                and final_jobs[0].get("job_id") == held.get("job_id"),
-            },
-        )
-        normal = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-a", "worker-b"],
-            timeout=40,
-        )
-        self.harness.require(
-            normal, "Cannot restore both workers after rollback recovery"
-        )
-
-    def _terminal_probe(
-        self, label: str, mode: str, expected_error: str | None
-    ) -> dict[str, Any]:
-        start, body, process_id = self._start(label, mode)
-        if process_id is None:
-            return {"valid": False, "start": self._command_view(start, body)}
-        process = self._poll_process(process_id, {"FAILED"}, timeout=8)
-        jobs = self._jobs(process_id)
-        attempts = self._attempts(process_id)
-        execution_id = str(jobs[0].get("execution_id")) if len(jobs) == 1 else ""
-        effects = self._effects(execution_id) if execution_id else []
-        return {
-            "valid": terminal_failure_consistent(
-                process,
-                jobs,
-                attempts,
-                effects,
-                expected_attempts=1,
-                expected_error=expected_error,
-            ),
-            "processState": process.get("state"),
-            "jobState": jobs[0].get("state") if jobs else None,
-            "attemptCount": len(attempts),
-            "errorCodes": [row.get("error_code") for row in attempts],
-            "effectCount": len(effects),
-        }
-
-    def resilience(self) -> None:
-        activate = self.harness.cli("flow", "activate", self.flow, "--version", "1")
-        if not self.harness.ok_envelope(*activate):
-            raise ContractError("Flow v1 could not be activated for persistence checks")
-        _, _, wait_id = self._start("wait-persistence", "signal")
-        if wait_id is None:
-            raise ContractError("WAITING_SIGNAL persistence process did not start")
-        self._poll_process(wait_id, {"WAITING_SIGNAL"})
-        waiting_ids = [item for item in (self.processes.get("manual"), wait_id) if item]
-        waiting_before = {
-            process_id: self._process_rows(process_id)[0] for process_id in waiting_ids
-        }
-        stopped = self.harness.compose(["stop", "worker-a", "worker-b"], timeout=30)
-        self.harness.require(
-            stopped, "Cannot stop workers before the READY persistence probe"
-        )
-        _, _, ready_id = self._start("ready-persistence", "signal")
-        if ready_id is None:
-            raise ContractError("READY persistence process did not start")
-        ready_before = self._jobs(ready_id)
-        if len(ready_before) != 1 or ready_before[0].get("state") != "READY":
-            raise ContractError("Stopped workers did not leave one READY job")
-        recreated = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-a", "worker-b"],
-            timeout=40,
-        )
-        self.harness.require(
-            recreated, "Cannot recreate workers for the READY persistence probe"
-        )
-        self._poll_process(ready_id, {"WAITING_SIGNAL"}, timeout=8)
-        ready_after = self._jobs(ready_id)
-        ready_preserved = (
-            len(ready_after) == 1
-            and ready_after[0].get("job_id") == ready_before[0].get("job_id")
-            and ready_after[0].get("execution_id")
-            == ready_before[0].get("execution_id")
-            and ready_after[0].get("state") == "SUCCEEDED"
-        )
-
-        _, _, retry_id = self._start("retry", "retry")
-        if retry_id is None:
-            raise ContractError("Retry process did not start")
-        retry_wait = self.harness.poll_rows(
-            "SELECT job_id::text, process_id::text, execution_id::text, state, lease_version, "
-            "attempt_count, next_attempt_at FROM autocheck.jobs "
-            f"WHERE process_id = {_sql_literal(retry_id)}",
-            lambda rows: len(rows) == 1 and rows[0].get("state") == "RETRY_WAIT",
-            timeout=3,
-            interval=0.02,
-        )[0]
-        retry_recreate = self.harness.compose(
-            ["up", "-d", "--no-build", "--force-recreate", "worker-a", "worker-b"],
-            timeout=40,
-        )
-        self.harness.require(
-            retry_recreate, "Cannot recreate workers during RETRY_WAIT"
-        )
-        retry_process = self._poll_process(retry_id, {"FAILED"}, timeout=8)
-        retry_jobs = self._jobs(retry_id)
-        retry_attempts = self._attempts(retry_id)
-        retry_execution = (
-            str(retry_jobs[0].get("execution_id")) if len(retry_jobs) == 1 else ""
-        )
-        retry_effects = self._effects(retry_execution) if retry_execution else []
-        retry_events = self._events(retry_id)
-        retry_valid = (
-            terminal_failure_consistent(
-                retry_process,
-                retry_jobs,
-                retry_attempts,
-                retry_effects,
-                expected_attempts=3,
-                expected_error=str(self.fixture["errorCodes"]["retry"]),
-            )
-            and [row.get("attempt_number") for row in retry_attempts] == [1, 2, 3]
-            and len({row.get("attempt_id") for row in retry_attempts}) == 3
-            and len({row.get("job_id") for row in retry_attempts}) == 1
-            and len({row.get("execution_id") for row in retry_attempts}) == 1
-            and any(row.get("event_type") == "TaskFailed" for row in retry_events)
-        )
-        error_probe = self._terminal_probe(
-            "non-retryable-error", "error", str(self.fixture["errorCodes"]["error"])
-        )
-        invalid_probe = self._terminal_probe("invalid-result", "invalid", None)
-        failures_ok = retry_valid and error_probe["valid"] and invalid_probe["valid"]
-        self.record(
-            "bounded-retry-and-terminal-failures",
-            "resilience",
-            failures_ok,
-            "three bounded retry attempts; non-retryable and invalid result fail once; no effects",
-            {
-                "retryAttemptCount": len(retry_attempts),
-                "retryErrorCodes": [row.get("error_code") for row in retry_attempts],
-                "taskFailedEvent": any(
-                    row.get("event_type") == "TaskFailed" for row in retry_events
-                ),
-                "nonRetryable": error_probe,
-                "invalidResult": invalid_probe,
-            },
-        )
-        waiting_preserved = True
-        for process_id, row in waiting_before.items():
-            current = self._process_rows(process_id)
-            waiting_preserved = (
-                waiting_preserved
-                and len(current) == 1
-                and all(
-                    current[0].get(field) == row.get(field)
-                    for field in (
-                        "process_id",
-                        "flow_name",
-                        "flow_version",
-                        "state",
-                        "current_step_key",
-                    )
-                )
-            )
-        retry_identity = (
-            len(retry_jobs) == 1
-            and retry_jobs[0].get("job_id") == retry_wait.get("job_id")
-            and retry_jobs[0].get("execution_id") == retry_wait.get("execution_id")
-        )
-        persistence_ok = ready_preserved and retry_identity and waiting_preserved
-        self.record(
-            "worker-recreate-persistence",
-            "resilience",
-            persistence_ok,
-            "READY, RETRY_WAIT, WAITING_SIGNAL and WAITING_MANUAL survive no-build recreation",
-            {
-                "readyIdentityPreserved": ready_preserved,
-                "retryIdentityPreserved": retry_identity,
-                "waitingStatesPreserved": waiting_preserved,
-            },
-        )
-
-    def integrity(self) -> None:
-        current = {
-            "api": self.harness.image_id("api"),
-            "worker": self.harness.image_id("worker-a"),
-        }
-        worker_b = self.harness.image_id("worker-b")
-        fixture_digest = canonical_fixture_digest(self.fixtures)
-        worker_security = self.harness.wait_worker_database_security()
-        worker_security_ok = (
-            worker_security.get("roleVerified") is True
-            and worker_security.get("allDmlDenied") is True
-            and worker_security.get("executeBoundaryRestricted") is True
-        )
-        valid = (
-            current == self.baseline_images
-            and worker_b == current["worker"]
-            and fixture_digest == self.fixture_digest
-            and worker_security_ok
-        )
-        self.record(
-            "runtime-image-immutability",
-            "integrity",
-            valid,
-            self.baseline_images,
-            {
-                **current,
-                "workerB": worker_b,
-                "fixtureDigestUnchanged": fixture_digest == self.fixture_digest,
-                "workerDatabaseSecurity": worker_security_ok,
-            },
-        )
-
-    def run_checks(self) -> None:
-        admitted = self.admission()
-        if not admitted:
-            for phase in PHASE_CHECKS:
-                self.fail_missing(phase, "Admission prerequisite failed")
-            return
-        self.run_phase("publication", self.publication)
-        if any(
-            item["name"] in PHASE_CHECKS["publication"] and item["status"] == "failed"
-            for item in self.checks
-        ):
-            for phase in (
-                "execution",
-                "versioning",
-                "concurrency",
-                "recovery",
-                "resilience",
-            ):
-                self.fail_missing(phase, "Publication prerequisite failed")
-        else:
-            self.run_phase("execution", self.execution)
-            self.run_phase("versioning", self.versioning)
-            self.run_phase("concurrency", self.concurrency)
-            self.run_phase("recovery", self.recovery)
-            self.run_phase("resilience", self.resilience)
-        self.run_phase("integrity", self.integrity)
-
-    def cleanup(self) -> str | None:
-        if self.args.keep_stack or not self.cleanup_armed:
-            return None
-        result = self.harness.compose(
-            ["down", "--volumes", "--remove-orphans", "--rmi", "local"],
-            timeout=120,
-        )
-        images_removed = True
-        for tag in self.created_image_tags:
-            image_result = self.harness.run(["docker", "image", "rm", tag], timeout=120)
-            missing = (
-                "no such image"
-                in (image_result.stdout + "\n" + image_result.stderr).casefold()
-            )
-            images_removed = images_removed and (image_result.ok or missing)
-        if result.ok and images_removed:
-            return None
-        return "Docker Compose resource or checker image cleanup failed"
-
-    def close(self) -> None:
-        shutil.rmtree(self.temp, ignore_errors=True)
+        if not result.ok:
+            raise EnvironmentFailure("isolated Docker cleanup failed")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True, type=Path)
-    parser.add_argument("--fixtures", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--compose-wrapper", required=True, type=Path)
-    parser.add_argument("--compose-file", type=Path)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--fixtures", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--compose-wrapper", required=True)
     parser.add_argument("--keep-stack", action="store_true")
-    parser.add_argument("--build-timeout", type=float, default=900)
-    parser.add_argument("--ready-timeout", type=float, default=60)
     return parser.parse_args(argv)
 
 
 def _validated_report_path(path: Path) -> Path:
-    candidate = path.expanduser()
-    if not candidate.is_absolute():
-        candidate = Path.cwd() / candidate
-    parent = candidate.parent
+    parent = path.parent.resolve()
+    if not parent.is_dir():
+        raise EnvironmentFailure("report parent directory does not exist")
+    if path.is_symlink():
+        raise EnvironmentFailure("report path must not be a symlink")
     try:
-        resolved_parent = parent.resolve(strict=True)
-    except OSError as error:
-        raise FixtureError(f"Report directory is unavailable: {error}") from error
-    if parent.absolute() != resolved_parent:
-        raise FixtureError("Report directory must not contain symlinks")
-    if candidate.is_symlink():
-        raise FixtureError("Report path must not be a symlink")
-    if candidate.exists() and not candidate.is_file():
-        raise FixtureError("Report path must be a regular file")
-    return resolved_parent / candidate.name
+        path.resolve().relative_to(parent)
+    except ValueError as error:
+        raise EnvironmentFailure("report path escapes its parent") from error
+    return path
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    target = _validated_report_path(path)
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
+    temporary.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
-    temporary = Path(temporary_name)
-    try:
-        os.chmod(temporary, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(report, stream, ensure_ascii=False, indent=2, sort_keys=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        temporary.unlink(missing_ok=True)
-        raise
+    temporary.replace(target)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    started = utc_now()
     args = parse_args(argv)
-    try:
-        args.output = _validated_report_path(args.output)
-    except (FixtureError, OSError) as error:
-        print(f"Cannot initialize public report: {error}", file=sys.stderr)
-        return 2
+    started_at = utc_now()
     checker: PublicChecker | None = None
+    status = "error"
+    exit_code = 2
     checks: list[dict[str, Any]] = []
     commands: list[dict[str, Any]] = []
-    exit_code = 2
-    status = "error"
+    message = ""
     try:
         checker = PublicChecker(args)
-        checker.run_checks()
-        checks = checker.checks
-        commands = checker.harness.commands
-        status = (
-            "passed" if all(item["status"] == "passed" for item in checks) else "failed"
-        )
-        exit_code = 0 if status == "passed" else 1
+        checker.execute()
+        status = "passed"
+        exit_code = 0
+    except (FixtureError, EnvironmentFailure) as error:
+        status = "error"
+        exit_code = 2
+        message = str(error)
     except ContractError as error:
-        if checker is not None:
-            checks = checker.checks
-            commands = checker.harness.commands
-        checks.append(
-            {
-                "name": "admission-contract",
-                "phase": "admission",
-                "status": "failed",
-                "expected": "published candidate contract is available",
-                "actual": _redact(str(error), (checker.secret,) if checker else ()),
-            }
-        )
         status = "failed"
         exit_code = 1
-    except (FixtureError, EnvironmentFailure, OSError, ValueError) as error:
-        if checker is not None:
-            checks = checker.checks
-            commands = checker.harness.commands
-        checks.append(
-            {
-                "name": "checker-environment",
-                "phase": "environment",
-                "status": "failed",
-                "expected": "checker initialization and local transports succeed",
-                "actual": _redact(str(error), (checker.secret,) if checker else ()),
-            }
-        )
-    except Exception as error:  # Checker defects are distinct from candidate failures.
-        if checker is not None:
-            checks = checker.checks
-            commands = checker.harness.commands
-        checks.append(
-            {
-                "name": "checker-internal-error",
-                "phase": "environment",
-                "status": "failed",
-                "expected": "checker completes all phases",
-                "actual": _redact(
-                    f"{type(error).__name__}: {error}",
-                    (checker.secret,) if checker else (),
-                ),
-            }
-        )
-    finally:
-        if checker is not None:
-            cleanup_error = checker.cleanup()
-            commands = checker.harness.commands
-            if cleanup_error:
-                checks.append(
-                    {
-                        "name": "stack-cleanup",
-                        "phase": "environment",
-                        "status": "failed",
-                        "expected": "compose down --volumes succeeds",
-                        "actual": cleanup_error,
-                    }
-                )
+        message = str(error)
+    except Exception as error:  # Trusted checker bug, not a candidate failure.
+        status = "error"
+        exit_code = 2
+        message = f"unexpected checker error: {type(error).__name__}"
+    if checker is not None:
+        checks = checker.checks
+        commands = checker.harness.commands if checker.harness else []
+        try:
+            checker.cleanup()
+        except Exception:
+            if status == "passed":
                 status = "error"
                 exit_code = 2
-            checker.close()
+                message = "trusted cleanup failed"
+    if message:
+        checks.append(
+            {
+                "name": "run-summary",
+                "phase": "checker",
+                "status": "failed" if status == "failed" else "error",
+                "expected": "public checker completes",
+                "actual": _redact(message, checker.sensitive if checker else ()),
+            }
+        )
     report = build_report(
-        started_at=started,
+        started_at=started_at,
         finished_at=utc_now(),
         status=status,
         checks=checks,
@@ -3703,27 +2659,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if report_has_forbidden_keys(report):
         report = build_report(
-            started_at=started,
+            started_at=started_at,
             finished_at=utc_now(),
             status="error",
             checks=[
                 {
-                    "name": "checker-report-shape",
-                    "phase": "environment",
-                    "status": "failed",
-                    "expected": "public-only report keys",
+                    "name": "report-safety",
+                    "phase": "checker",
+                    "status": "error",
+                    "expected": "safe report keys",
                     "actual": "forbidden report key detected",
                 }
             ],
-            commands=commands,
+            commands=[],
         )
         exit_code = 2
     try:
-        _write_report(args.output, report)
-    except OSError as error:
+        _write_report(Path(args.output), report)
+    except Exception as error:
         print(f"Cannot write public report: {error}", file=sys.stderr)
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"week-3 public check: {status}")
     return exit_code
 
 

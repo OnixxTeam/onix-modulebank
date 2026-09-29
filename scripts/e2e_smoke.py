@@ -31,6 +31,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -40,7 +41,10 @@ import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GATEWAY_URL = "http://localhost:8080"
+# The single published entry point. COURSE_GATEWAY_PORT moves it, exactly as it
+# does in compose.yaml, so a run against a stack started on another port needs
+# no edit here.
+GATEWAY_URL = f"http://127.0.0.1:{os.environ.get('COURSE_GATEWAY_PORT', '8080')}"
 JWT_SIGNING_KEY = "dev-insecure-key-not-for-production-32"  # compose.yaml's own default
 ISSUER = "moduledev-course"
 AUDIENCE = "moduledev-api"

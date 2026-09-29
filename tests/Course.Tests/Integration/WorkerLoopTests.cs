@@ -1,8 +1,10 @@
 using System.Text.Json.Nodes;
 using Course.Core.Actions;
+using Course.Core.Diagnostics;
 using Course.Core.Validation;
 using Course.Infrastructure.Postgres;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Workflow.Core.Canonicalization;
 using Workflow.Core.Runtime;
@@ -262,7 +264,7 @@ public sealed class WorkerLoopTests
 
         var owner = NewOwner();
         var output = new StringWriter();
-        var loop = CreateLoop(owner, new FailpointGate("after_job_claim", output));
+        var loop = CreateLoop(owner, new FailpointGate("after_job_claim", owner, output));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
@@ -294,7 +296,7 @@ public sealed class WorkerLoopTests
 
         var owner = NewOwner();
         var output = new StringWriter();
-        var loop = CreateLoop(owner, new FailpointGate("after_action_before_finish", output));
+        var loop = CreateLoop(owner, new FailpointGate("after_action_before_finish", owner, output));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => loop.RunOnceAsync(cts.Token));
@@ -340,6 +342,75 @@ public sealed class WorkerLoopTests
     // executor's own NpgsqlDataSource -- connection and transaction are always
     // the caller's -- so reusing the course_runtime-backed singleton here is
     // safe even though this loop talks to Postgres as workflow_worker.
+    // Week 4, ticket 10: one structured line per finished attempt, carrying the
+    // identifiers the published log contract lists -- and nothing a log must never
+    // hold. Asserted through ILogger's own state rather than by parsing stdout: the
+    // JSON console formatter turns these same named values into fields, so the names
+    // are what matter. Before this the loop wrote one plain-text line to stderr on a
+    // claim failure and nothing at all on a successful attempt.
+    [Fact]
+    public async Task RunOnce_LogsEveryIdentifierTheLogContractLists()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "SUCCESS", value: "logged-world");
+        await StartProcessAsync(flowName);
+
+        var recorder = new RecordingLogger();
+        var result = await CreateLoop(NewOwner(), factory.Postgres.JobRuntime, failpoints: null, recorder)
+            .RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(WorkerStepOutcome.Succeeded, result.Outcome);
+
+        var line = Assert.Single(recorder.Lines, entry => entry.ContainsKey("Outcome"));
+
+        foreach (var field in new[]
+                 {
+                     "Owner", "CorrelationId", "ProcessId", "FlowName", "FlowVersion", "StepKey",
+                     "JobId", "ExecutionId", "AttemptId", "LeaseVersion", "Module", "Action",
+                     "ActionVersion", "Outcome", "ErrorCode", "DurationMs",
+                 })
+        {
+            Assert.True(line.ContainsKey(field), $"missing field {field}");
+        }
+
+        // The three migration 050 added travel with the claim; before it they were
+        // absent from the payload the worker sees, and a log line could not name the
+        // flow it was executing.
+        Assert.Equal(flowName, line["FlowName"]);
+        Assert.NotEqual("", (string?)line["StepKey"]);
+        Assert.NotEqual(0, (int?)line["FlowVersion"]);
+
+        // Outcome and error code are mutually exclusive by construction.
+        Assert.NotNull(line["Outcome"]);
+        Assert.Null(line["ErrorCode"]);
+    }
+
+    [Fact]
+    public async Task RunOnce_LogsNoPayloadNoResultAndNoSecret()
+    {
+        var flowName = NewFlowName();
+        await PublishAndActivateConstantsOnlyFlowAsync(flowName, mode: "SUCCESS", value: "secret-looking-value");
+        await StartProcessAsync(flowName);
+
+        var recorder = new RecordingLogger();
+        await CreateLoop(NewOwner(), factory.Postgres.JobRuntime, failpoints: null, recorder)
+            .RunOnceAsync(CancellationToken.None);
+
+        Assert.NotEmpty(recorder.Rendered);
+
+        foreach (var rendered in recorder.Rendered)
+        {
+            // The step's own value is part of the payload and the result; neither
+            // belongs in a log line, so its appearance anywhere is the failure.
+            Assert.DoesNotContain("secret-looking-value", rendered, StringComparison.Ordinal);
+
+            foreach (var forbidden in new[] { "Bearer ", "password", "signature", "hmac" })
+            {
+                Assert.DoesNotContain(forbidden, rendered, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
+
     private WorkerLoop CreateLoop(string owner) => CreateLoop(owner, failpoints: null);
 
     private WorkerLoop CreateLoop(string owner, IFailpointGate? failpoints) =>
@@ -347,7 +418,11 @@ public sealed class WorkerLoopTests
 
     private WorkerLoop CreateLoop(string owner, IWorkflowJobRuntime jobRuntime) => CreateLoop(owner, jobRuntime, failpoints: null);
 
-    private WorkerLoop CreateLoop(string owner, IWorkflowJobRuntime jobRuntime, IFailpointGate? failpoints)
+    private WorkerLoop CreateLoop(string owner, IWorkflowJobRuntime jobRuntime, IFailpointGate? failpoints) =>
+        CreateLoop(owner, jobRuntime, failpoints, logger: null);
+
+    private WorkerLoop CreateLoop(
+        string owner, IWorkflowJobRuntime jobRuntime, IFailpointGate? failpoints, ILogger<WorkerLoop>? logger)
     {
         var dataSource = NpgsqlDataSource.Create(factory.Postgres.WorkerConnectionString);
         var validator = factory.Services.GetRequiredService<ISchemaValidator>();
@@ -355,7 +430,31 @@ public sealed class WorkerLoopTests
 
         return new WorkerLoop(
             owner, dataSource, jobRuntime, actionExecutor, validator, TimeProvider.System,
-            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes, failpoints);
+            new IntervalProfile(LeaseMs: 30_000, PollIntervalMs: 100), WorkflowWorkerPrincipal.DefaultScopes, failpoints,
+            logger);
+    }
+
+    private sealed class RecordingLogger : ILogger<WorkerLoop>
+    {
+        public List<Dictionary<string, object?>> Lines { get; } = [];
+
+        public List<string> Rendered { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Rendered.Add(formatter(state, exception));
+
+            if (state is IReadOnlyList<KeyValuePair<string, object?>> values)
+            {
+                Lines.Add(values.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+            }
+        }
     }
 
     // Delegates every call to the real runtime except the first N ClaimAsync

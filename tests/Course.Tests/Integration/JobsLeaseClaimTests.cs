@@ -292,10 +292,10 @@ public sealed class JobsLeaseClaimTests
     private static string NewOwner() => $"owner-{Guid.NewGuid():N}";
 
     private static string FixturePath(string fileName) =>
-        RepoPaths.Combine("autocheck", "fixtures", "maps", fileName);
+        RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", fileName);
 
     private static string ManifestPath(string fileName) =>
-        RepoPaths.Combine("autocheck", "fixtures", "manifests", fileName);
+        RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "manifests", fileName);
 
     // The autocheck fixture map/action pair (3c363d117b40): its first step is
     // AUTOMATIC, which is exactly the shape this ticket needs and nothing this

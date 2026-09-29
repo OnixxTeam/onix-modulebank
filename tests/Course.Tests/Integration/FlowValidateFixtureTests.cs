@@ -34,12 +34,12 @@ public sealed class FlowValidateFixtureTests
     }
 
     public static IEnumerable<object[]> ValidFixtures() =>
-        Directory.GetFiles(RepoPaths.Combine("autocheck", "fixtures", "maps"), "*.flow.*", SearchOption.TopDirectoryOnly)
+        Directory.GetFiles(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps"), "*.flow.*", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => new object[] { path });
 
     public static IEnumerable<object[]> InvalidFixtures() =>
-        Directory.GetFiles(RepoPaths.Combine("autocheck", "fixtures", "maps", "invalid"), "*.flow.json", SearchOption.AllDirectories)
+        Directory.GetFiles(RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "maps", "invalid"), "*.flow.json", SearchOption.AllDirectories)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => new object[] { path });
 
@@ -108,6 +108,116 @@ public sealed class FlowValidateFixtureTests
         Assert.Contains("payment-review", activeFlowNames);
     }
 
+    // Ticket 19: bootstrap used to call ActivateAsync unconditionally for each
+    // bundled map, on the assumption that no other version would ever exist.
+    // Once an operator publishes and activates v2, the next `docker compose up`
+    // silently moved the active version back to the bundled v1 -- the same
+    // defect the action half of bootstrap was already fixed for.
+    //
+    // Two throwaway flows under the production file names: bootstrap picks the
+    // files by name, and the flow name comes from the document, so this stays
+    // clear of the real payment-processing/payment-review rows the rest of the
+    // collection runs on.
+    [Fact]
+    public async Task RepeatBootstrap_AfterAnOperatorActivatedAnotherVersion_LeavesTheActiveVersionAlone()
+    {
+        await EnsureProbeManifestPublishedAsync();
+        var pinnedFlow = $"bootstrap-pinned-{Guid.NewGuid():N}";
+        var untouchedFlow = $"bootstrap-untouched-{Guid.NewGuid():N}";
+        var mapsDirectory = WriteProductionMaps(
+            ("payment-processing-v1.flow.yaml", ProbeFlow(pinnedFlow, version: 1)),
+            ("payment-review-v1.flow.yaml", ProbeFlow(untouchedFlow, version: 1)));
+        var emptyManifestsDirectory = Directory.CreateTempSubdirectory("bootstrap-flow-pin-manifests-").FullName;
+
+        var first = await RunBootstrapAsync(emptyManifestsDirectory, mapsDirectory);
+        Assert.Equal("ok", first.Status);
+        Assert.Equal(1, await ActiveVersionAsync(pinnedFlow));
+        Assert.Equal(1, await ActiveVersionAsync(untouchedFlow));
+
+        var publishedV2 = await factory.Postgres.FlowPublisher.PublishAsync(
+            ProbeFlow(pinnedFlow, version: 2),
+            Workflow.Core.Canonicalization.JsonCanonicalizer.Sha256Hex(ProbeFlow(pinnedFlow, version: 2)),
+            CancellationToken.None);
+        Assert.Equal("ok", publishedV2["status"]!.GetValue<string>());
+        var activatedV2 = await factory.Postgres.FlowPublisher.ActivateAsync(pinnedFlow, 2, CancellationToken.None);
+        Assert.Equal("ok", activatedV2["status"]!.GetValue<string>());
+
+        var second = await RunBootstrapAsync(emptyManifestsDirectory, mapsDirectory);
+        Assert.Equal("ok", second.Status);
+
+        Assert.Equal(2, await ActiveVersionAsync(pinnedFlow));
+        Assert.Equal(1, await ActiveVersionAsync(untouchedFlow));
+    }
+
+    private Task<Course.Core.Cli.CliEnvelope> RunBootstrapAsync(string manifestsDirectory, string mapsDirectory) =>
+        BootstrapCommand.ExecuteAsync(
+            factory.Postgres.MigrationRunner,
+            factory.Postgres.Publisher,
+            SchemaValidator,
+            ManifestSchema.Load(),
+            RepoPaths.Combine("db", "migrations"),
+            manifestsDirectory,
+            CancellationToken.None,
+            flowMapValidator: BuildValidator(),
+            flowPublisher: factory.Postgres.FlowPublisher,
+            flowMapsDirectory: mapsDirectory);
+
+    private async Task<int?> ActiveVersionAsync(string flowName)
+    {
+        var flows = await factory.Postgres.FlowPublisher.ListAsync(CancellationToken.None);
+        return flows!.AsArray()
+            .Where(entry => entry!["flowName"]!.GetValue<string>() == flowName && entry["isActive"]!.GetValue<bool>())
+            .Select(entry => (int?)entry!["flowVersion"]!.GetValue<int>())
+            .SingleOrDefault();
+    }
+
+    private static string WriteProductionMaps(params (string FileName, System.Text.Json.Nodes.JsonNode Document)[] maps)
+    {
+        var directory = Directory.CreateTempSubdirectory("bootstrap-flow-pin-maps-").FullName;
+        foreach (var (fileName, document) in maps)
+        {
+            File.WriteAllText(Path.Combine(directory, fileName), document.ToJsonString());
+        }
+
+        return directory;
+    }
+
+    // One automatic workflow.probe step and an end: the smallest document the
+    // real WorkflowMapValidator accepts against the published catalog.
+    private static System.Text.Json.Nodes.JsonNode ProbeFlow(string flowName, int version) =>
+        System.Text.Json.Nodes.JsonNode.Parse($$"""
+            {
+              "contract_version": "course-1",
+              "flow_name": "{{flowName}}",
+              "version": {{version}},
+              "start_step": "probe",
+              "steps": [
+                {
+                  "key": "probe",
+                  "type": "automatic",
+                  "task": {
+                    "service": "postgres",
+                    "module": "workflow",
+                    "action": "probe",
+                    "action_version": 1,
+                    "required_policy": ["workflow:execute"],
+                    "timeout_ms": 5000,
+                    "retry": {"max_attempts": 1, "delays_ms": []},
+                    "input_mapping": {},
+                    "input_constants": {"mode": "SUCCESS", "value": "{{flowName}}"}
+                  }
+                },
+                {"key": "review", "type": "manual", "allowed_outcomes": ["APPROVED"]},
+                {"key": "end", "type": "end", "outcome": "DONE"}
+              ],
+              "transitions": [
+                {"from": "probe", "outcome": "SUCCEEDED", "to": "end"},
+                {"from": "probe", "outcome": "ROUTE_MANUAL", "to": "review"},
+                {"from": "review", "outcome": "APPROVED", "to": "end"}
+              ]
+            }
+            """)!;
+
     private WorkflowMapValidator BuildValidator() =>
         new(SchemaValidator, MapSchemaDocument, new ActionPublisherCatalog(factory.Postgres.Publisher), WorkflowWorkerPrincipal.DefaultScopes);
 
@@ -115,7 +225,7 @@ public sealed class FlowValidateFixtureTests
     {
         foreach (var name in new[] { "3c363d117b40.action.json", "3c363d117b40-disabled.action.json" })
         {
-            var path = RepoPaths.Combine("autocheck", "fixtures", "manifests", name);
+            var path = RepoPaths.Combine("tests", "Course.Tests", "Fixtures", "manifests", name);
             var document = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path))!;
             var manifest = Course.Core.Actions.ActionManifest.FromDocument(document);
 

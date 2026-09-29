@@ -23,6 +23,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Workflow.Core", "src\Workfl
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Workflow.Worker", "src\Workflow.Worker\Workflow.Worker.csproj", "{BE267D8C-6B2C-4194-BB7E-15E0E43ECF2D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Course.Observability", "src\Course.Observability\Course.Observability.csproj", "{FC651999-B700-48CA-8C60-0C2A7B975035}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -129,6 +131,18 @@ Global
 		{BE267D8C-6B2C-4194-BB7E-15E0E43ECF2D}.Release|x64.Build.0 = Release|Any CPU
 		{BE267D8C-6B2C-4194-BB7E-15E0E43ECF2D}.Release|x86.ActiveCfg = Release|Any CPU
 		{BE267D8C-6B2C-4194-BB7E-15E0E43ECF2D}.Release|x86.Build.0 = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|x64.Build.0 = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Debug|x86.Build.0 = Debug|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|x64.ActiveCfg = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|x64.Build.0 = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|x86.ActiveCfg = Release|Any CPU
+		{FC651999-B700-48CA-8C60-0C2A7B975035}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -142,5 +156,6 @@ Global
 		{30885BCB-4E08-4E8A-BB5F-A9F75C53A620} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{284D13A0-A9F9-4B92-9EBB-7E92025FED34} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{BE267D8C-6B2C-4194-BB7E-15E0E43ECF2D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{FC651999-B700-48CA-8C60-0C2A7B975035} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

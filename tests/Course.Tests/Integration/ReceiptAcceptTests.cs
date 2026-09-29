@@ -234,6 +234,50 @@ public sealed class ReceiptAcceptTests
         Assert.Equal("idempotency.conflict", second.Body["code"]!.GetValue<string>());
     }
 
+    // Ticket 17: the same trap one layer up. With a *different* idempotency
+    // command the test above already reaches receipt.accept, which compares the
+    // exact raw-body hash itself. With the *same* command, api.invoke's generic
+    // replay used to answer first -- it hashes the normalised jsonb text, so
+    // two differently-serialized signed bodies looked identical to it and the
+    // second one got the first one's envelope back, HTTP 200, with the exact
+    // -byte conflict never reaching the Inbox at all.
+    [Fact]
+    public async Task SameIdempotencyKey_DifferentlySerializedSignedBody_Rejects409_AndNeverReplays()
+    {
+        var (client, externalRequestId, _) = await PrepareExternalRequestAsync("1000.00");
+        var messageId = $"provider-{Guid.NewGuid():N}";
+        var key = $"receipt-{Guid.NewGuid():N}";
+        var compactBody = ReceiptBody(externalRequestId, messageId);
+        var reserializedBody = $$"""
+            {
+              "version": 1,
+              "providerPaymentId": "{{messageId}}",
+              "outcome": "COMPLETED",
+              "occurredAt": "2026-09-04T12:00:00Z",
+              "messageId": "{{messageId}}",
+              "externalRequestId": "{{externalRequestId}}"
+            }
+            """;
+        Assert.NotEqual(compactBody, reserializedBody);
+
+        var first = await PostSignedReceiptAsync(client, compactBody, key);
+        Assert.Equal(200, first.StatusCode);
+        Assert.Equal("RECEIVED", first.Body["outcome"]!.GetValue<string>());
+
+        var second = await PostSignedReceiptAsync(client, reserializedBody, key);
+
+        Assert.Equal(409, second.StatusCode);
+        Assert.Equal("idempotency.conflict", second.Body["code"]!.GetValue<string>());
+
+        var inboxCount = await factory.Postgres.ScalarAsOwnerAsync<long>(
+            "select count(*) from delivery.inbox where message_id = @id", ("id", messageId));
+        Assert.Equal(1, inboxCount);
+
+        var receiptCount = await factory.Postgres.ScalarAsOwnerAsync<long>(
+            "select count(*) from core.receipts where message_id = @id", ("id", messageId));
+        Assert.Equal(1, receiptCount);
+    }
+
     private static async Task<ActionResponse> PostSignedReceiptAsync(HttpClient client, string body, string idempotencyKey)
     {
         var header = ProviderSignature.Header(ApiFactory.ProviderHmacSecret, Encoding.UTF8.GetBytes(body));
