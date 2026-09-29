@@ -1,4 +1,4 @@
-# Неделя 1-3. Database-first action runtime, workflow-ядро и Python-периметр
+# Неделя 1-4. Database-first action runtime, workflow-ядро и Python-периметр
 
 C# gateway и generic action runtime поверх PostgreSQL: клиент вызывает
 опубликованный action через единый маршрут, но не выбирает базу, schema,
@@ -16,7 +16,9 @@ PostgreSQL и общую границу подписи в C# API — подро�
 проверочных views — [`docs/week1/contract-reference.md`](docs/week1/contract-reference.md).
 Условие недели 2 и связанные материалы — [`docs/week2/`](docs/week2/). Условие
 недели 3, внешние HTTP-контракты провайдера и материалы участника —
-[`docs/week3/`](docs/week3/).
+[`docs/week3/`](docs/week3/). Неделя 4 добавляет конкурентную доставку,
+recovery после остановки контейнеров, failpoints и наблюдаемость; операционные
+команды собраны в [`docs/week4/runbook.md`](docs/week4/runbook.md).
 
 ## Решение
 
@@ -275,6 +277,7 @@ Checksummed migrations в [`db/migrations`](db/migrations) применяет т
 make test        # dotnet test: unit + integration
 cd python && uv run pytest   # Python unit-тесты периметра, без базы и сети
 make e2e          # сквозной прогон обеих карт поверх уже собранного compose
+make e2e_recovery # все шесть week-4 failpoints: acknowledgement, kill, recovery
 make ci           # dotnet format --verify-no-changes + build -warnaserror + test
 ```
 
@@ -288,6 +291,23 @@ Checkers прошлых недель заархивированы и остаю�
 `oldcheck/week2/check.sh` (`week-2-public-check/1.1`) и
 `oldcheck/week1/check.sh`. Они не запускаются `make check` — это проверки
 прошлых инкрементов, а не текущего.
+
+Week 4 checker остаётся отдельным доверенным репозиторием и не копируется в
+решение. Для полной проверки нужны Docker Engine, Docker Compose v2 с
+`!override`, `!reset` и `config --no-env-resolution`, Python 3.11+ и host-клиент
+`psql`:
+
+```bash
+git clone https://github.com/fintech-dev-lab/moduledev-week-4-reliability-task.git /tmp/week4-checker
+/tmp/week4-checker/check.sh --repo "$(pwd)"
+```
+
+Checker сам делает cold build, поднимает изолированный stack, запускает
+regression недели 3 и пишет игнорируемый `week-4-public-report.json`. `.env`
+для проверки не нужен: checker передаёт synthetic configuration через Compose
+override. Первый локальный запуск остаётся одной командой `docker compose up
+-d --build`; readiness проверяется через `http://localhost:8080/health/live`
+и `http://localhost:8080/health/ready`.
 
 ### Диагностика
 
@@ -311,6 +331,9 @@ Checkers прошлых недель заархивированы и остаю�
   `operation_id` замыкает цепочку на исходный платёж. Все шесть проекций
   (`external_requests`, `receipts`, `outbox`, `inbox`, `decisions` плюс
   `workflow`-проекции недели 2) читаются через `make psql`.
+
+Команды `diagnostics.trace` и `diagnostics.stalled` с правилами чтения их
+безопасных результатов приведены в [`docs/week4/runbook.md`](docs/week4/runbook.md).
 
 ### Ограничения
 
