@@ -161,9 +161,10 @@ def main() -> None:
 
     with httpx.Client(follow_redirects=False) as client:
         app = create_app(config, client)
-        # log_config=None: see serve_in_background -- uvicorn would otherwise replace
-        # the JSON log handler with its own plain-text one.
-        uvicorn.run(app, host="0.0.0.0", port=8082, log_config=None)
+        # Uvicorn's access log includes the full request path. The callback path
+        # contains a bearer capability, so it must never reach container logs.
+        # log_config=None preserves the JSON handler for application logs.
+        uvicorn.run(app, host="0.0.0.0", port=8082, log_config=None, access_log=False)
 
 
 if __name__ == "__main__":
