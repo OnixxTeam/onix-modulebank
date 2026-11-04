@@ -1,3 +1,5 @@
+# Результат прохождения курса от ModuleBank
+
 # Неделя 1-4. Database-first action runtime, workflow-ядро и Python-периметр
 
 C# gateway и generic action runtime поверх PostgreSQL: клиент вызывает
